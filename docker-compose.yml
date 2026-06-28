@@ -3,9 +3,9 @@
 #
 # This is the complete stack a printer owner runs on their home machine/NAS/Pi.
 # It includes:
-#   - bambuddy        : printer management, MQTT bridge, file queue, web UI
-#   - orca-slicer-api : headless OrcaSlicer sidecar (optional server-side slicing)
-#   - neuslice-agent: the NeuSlice marketplace bridge (this repo)
+#   - bambuddy       : printer management, MQTT bridge, file queue, web UI
+#   - neuslice-agent : the NeuSlice marketplace bridge
+#   - watchtower     : automatic agent self-updates (no action required)
 #
 # Quick start:
 #   cp .env.example .env      # fill in your values
@@ -36,26 +36,6 @@ services:
       timeout: 10s
       retries: 5
       start_period: 20s
-    networks:
-      - neuslice_net
-
-  # ── OrcaSlicer API sidecar (optional) ───────────────────────────────────────
-  # Enables server-side headless slicing. Bambuddy's "Slice" button uses this.
-  # Comment out this service if you don't need server-side slicing.
-  orca-slicer-api:
-    image: ghcr.io/afkfelix/orca-slicer-api:latest
-    container_name: orca-slicer-api
-    restart: unless-stopped
-    ports:
-      - "3003:3003"
-    volumes:
-      - orca_profiles:/profiles
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:3003/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s   # OrcaSlicer takes a moment to initialize
     networks:
       - neuslice_net
 
@@ -147,8 +127,6 @@ volumes:
 
   bambuddy_data:
     # Persists Bambuddy database, print archives, thumbnails, and profiles
-  orca_profiles:
-    # Persists OrcaSlicer printer/filament profiles
 
 # ── Network ──────────────────────────────────────────────────────────────────
 networks:
