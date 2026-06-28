@@ -49,7 +49,7 @@ success "Install directory: $INSTALL_DIR"
 # ── 3. Download docker-compose.yml ────────────────────────────────────────────
 
 info "Downloading docker-compose.yml..."
-curl -fsSL "$COMPOSE_URL" -o docker-compose.yml
+curl -fsSL --no-cache "$COMPOSE_URL" -o docker-compose.yml
 success "docker-compose.yml downloaded"
 
 # ── 4. Collect agent token ────────────────────────────────────────────────────

@@ -74,11 +74,13 @@ Write-Success "Install directory: $INSTALL_DIR"
 Write-Header "Downloading docker-compose.yml..."
 
 try {
-    Invoke-WebRequest -Uri $COMPOSE_URL -OutFile 'docker-compose.yml' -UseBasicParsing
+    # Force overwrite with no-cache headers to ensure we always get the latest version.
+    Invoke-WebRequest -Uri $COMPOSE_URL -OutFile 'docker-compose.yml' -UseBasicParsing `
+        -Headers @{ 'Cache-Control' = 'no-cache'; 'Pragma' = 'no-cache' }
 } catch {
     Write-Fail "Failed to download docker-compose.yml: $_"
 }
-Write-Success "docker-compose.yml downloaded"
+Write-Success "docker-compose.yml downloaded ($(((Get-Item 'docker-compose.yml').LastWriteTime).ToString('HH:mm:ss')))"
 
 # ── 4. Collect agent token ────────────────────────────────────────────────────
 
