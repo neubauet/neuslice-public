@@ -67,7 +67,8 @@ Write-Success "Install directory: $INSTALL_DIR"
 
 Write-Header "Downloading docker-compose.yml..."
 try {
-    Invoke-WebRequest -Uri $COMPOSE_URL -OutFile 'docker-compose.yml' -UseBasicParsing `
+    $bustUrl = "${COMPOSE_URL}?t=$(Get-Date -UFormat %s)"
+    Invoke-WebRequest -Uri $bustUrl -OutFile 'docker-compose.yml' -UseBasicParsing `
         -Headers @{ 'Cache-Control' = 'no-cache'; 'Pragma' = 'no-cache' }
 } catch {
     Write-Fail "Failed to download docker-compose.yml: $_"

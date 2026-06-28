@@ -57,7 +57,7 @@ ok "Install directory: $INSTALL_DIR"
 # ── 3. Download docker-compose.yml ────────────────────────────────────────────
 
 header "Downloading docker-compose.yml..."
-curl -fsSL --no-cache "$COMPOSE_URL" -o docker-compose.yml
+curl -fsSL --no-cache "${COMPOSE_URL}?t=$(date +%s)" -o docker-compose.yml
 ok "docker-compose.yml downloaded"
 
 # ── 4. Setup questions ────────────────────────────────────────────────────────
