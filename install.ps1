@@ -4,16 +4,25 @@
     NeuSlice Node Installer for Windows
 .DESCRIPTION
     Sets up the NeuSlice agent on Windows using Docker Desktop.
-    Optionally installs Bambuddy if you don't already have it.
+    Handles full registration automatically — no manual token copying required.
+    If NEUSLICE_SETUP_CODE is set in the environment, uses it directly (one-liner mode).
+    Otherwise, opens the NeuSlice dashboard so you can register your printer and get a code.
 .EXAMPLE
+    # One-liner from dashboard (recommended):
+    $env:NEUSLICE_SETUP_CODE="ABC123"; irm https://raw.githubusercontent.com/neubauet/neuslice-public/main/install.ps1 | iex
+.EXAMPLE
+    # Manual run:
     irm https://raw.githubusercontent.com/neubauet/neuslice-public/main/install.ps1 | iex
 #>
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$COMPOSE_URL = 'https://raw.githubusercontent.com/neubauet/neuslice-public/main/docker-compose.yml'
-$INSTALL_DIR = if ($env:NEUSLICE_DIR) { $env:NEUSLICE_DIR } else { "$env:USERPROFILE\.neuslice" }
+$COMPOSE_URL    = 'https://raw.githubusercontent.com/neubauet/neuslice-public/main/docker-compose.yml'
+$DASHBOARD_URL  = 'https://neuslice.com/nodes/register'
+$BACKEND_URL    = 'https://printshare-backend-234aeo2mva-uc.a.run.app'
+$CALLBACK_PORT  = 9876
+$INSTALL_DIR    = if ($env:NEUSLICE_DIR) { $env:NEUSLICE_DIR } else { "$env:USERPROFILE\.neuslice" }
 
 function Write-Header  { Write-Host "`n  $args" -ForegroundColor White }
 function Write-Success { Write-Host "  [OK] $args" -ForegroundColor Green }
@@ -75,7 +84,7 @@ try {
 }
 Write-Success "docker-compose.yml downloaded"
 
-# ── 4. Setup questions ────────────────────────────────────────────────────────
+# ── 4. Configuration ──────────────────────────────────────────────────────────
 
 Write-Host ""
 Write-Host "  ── Setup ──────────────────────────────────" -ForegroundColor DarkGray
@@ -93,33 +102,86 @@ if ((Test-Path '.env') -and (Select-String -Path '.env' -Pattern '^NEUSLICE_TOKE
 
 if (-not $skipEnv) {
 
-    # Agent token
-    Write-Host ""
-    Write-Host "  Get your Agent Token from the NeuSlice dashboard:" -ForegroundColor DarkGray
-    Write-Host "  Dashboard -> Your Printers -> Add Printer -> Copy Agent Token" -ForegroundColor DarkGray
-    Write-Host ""
-    $agentToken = ''
-    while ($agentToken -eq '') {
-        $agentToken = Read-Host "  Paste your Agent Token"
-        if ($agentToken -eq '') { Write-Warn "Token cannot be empty." }
+    # ── Get setup code (auto from env var, or via local callback) ─────────────
+    $setupCode = $env:NEUSLICE_SETUP_CODE
+
+    if (-not $setupCode) {
+        Write-Host ""
+        Write-Host "  We'll open the NeuSlice dashboard in your browser." -ForegroundColor DarkGray
+        Write-Host "  Fill in your printer details there and click 'Register'." -ForegroundColor DarkGray
+        Write-Host "  The installer will finish automatically — no copying required." -ForegroundColor DarkGray
+        Write-Host ""
+
+        # Start local HTTP listener on $CALLBACK_PORT
+        Write-Header "Starting local setup listener on port $CALLBACK_PORT..."
+
+        $listener = [System.Net.HttpListener]::new()
+        $listener.Prefixes.Add("http://localhost:${CALLBACK_PORT}/")
+        try {
+            $listener.Start()
+        } catch {
+            Write-Fail "Could not bind to port ${CALLBACK_PORT}. Check if another process is using it: netstat -ano | findstr :${CALLBACK_PORT}"
+        }
+        Write-Success "Listener ready"
+
+        # Open dashboard
+        Write-Host ""
+        Write-Host "  Opening NeuSlice dashboard..." -ForegroundColor Cyan
+        Start-Process $DASHBOARD_URL
+        Write-Host "  Waiting for you to complete registration in your browser..." -ForegroundColor DarkGray
+        Write-Host ""
+
+        # Wait for browser callback (blocks until request arrives)
+        $context  = $listener.GetContext()
+        $rawUrl   = $context.Request.RawUrl   # /?code=XXXXXX
+        $listener.Stop()
+
+        # Parse code from query string
+        $uri      = [System.Uri]("http://localhost${rawUrl}")
+        $query    = [System.Web.HttpUtility]::ParseQueryString($uri.Query)
+        $setupCode = $query["code"]
+
+        # Send success response to browser (closes the tab gracefully)
+        $responseBytes = [System.Text.Encoding]::UTF8.GetBytes("OK")
+        $context.Response.StatusCode        = 200
+        $context.Response.ContentType       = "text/plain"
+        $context.Response.ContentLength64   = $responseBytes.Length
+        $context.Response.OutputStream.Write($responseBytes, 0, $responseBytes.Length)
+        $context.Response.OutputStream.Close()
+
+        if (-not $setupCode) {
+            Write-Fail "Setup code not received from dashboard. Try running the one-liner from the dashboard instead."
+        }
+        Write-Success "Setup code received"
+    } else {
+        Write-Success "Using setup code from environment: $($setupCode.Substring(0,3))***"
     }
 
-    Write-Host ""
-    Write-Host "  Your Node ID is shown alongside your Agent Token in the dashboard." -ForegroundColor DarkGray
-    Write-Host ""
-    $nodeId = ''
-    while ($nodeId -eq '') {
-        $nodeId = Read-Host "  Paste your Node ID"
-        if ($nodeId -eq '') { Write-Warn "Node ID cannot be empty." }
+    # ── Exchange code for full config ─────────────────────────────────────────
+    Write-Header "Exchanging setup code for configuration..."
+
+    $exchangeUrl  = "${BACKEND_URL}/api/v1/setup/exchange"
+    $exchangeBody = '{"code":"' + $setupCode.ToUpper() + '"}'
+
+    try {
+        $response = Invoke-RestMethod -Uri $exchangeUrl -Method Post -Body $exchangeBody `
+            -ContentType 'application/json' -ErrorAction Stop
+    } catch {
+        $statusCode = $_.Exception.Response.StatusCode.value__
+        if ($statusCode -eq 404) { Write-Fail "Setup code not found. It may have already been used or never existed." }
+        if ($statusCode -eq 410) { Write-Fail "Setup code has expired (10-minute limit). Please register again from the dashboard." }
+        if ($statusCode -eq 409) { Write-Fail "Setup code already used. Please register again from the dashboard." }
+        Write-Fail "Exchange failed (HTTP $statusCode): $_"
     }
 
-    # Bambuddy
-    Write-Host ""
-    Write-Host "  Bambuddy manages communication between NeuSlice and your printer." -ForegroundColor DarkGray
-    Write-Host ""
-    $hasBambuddy = Ask-YesNo "Do you already have Bambuddy installed and running?" $false
+    $agentToken      = $response.agent_token
+    $nodeId          = $response.node_id
+    $hasBambuddy     = [bool]$response.has_bambuddy
 
-    $bambuddyUrl   = 'http://localhost:8000'
+    Write-Success "Configuration received for: $($response.display_name) ($($response.printer_model))"
+
+    # ── Bambuddy ──────────────────────────────────────────────────────────────
+    $bambuddyUrl    = 'http://localhost:8000'
     $composeProfile = ''
 
     if ($hasBambuddy) {
@@ -131,10 +193,10 @@ if (-not $skipEnv) {
         $composeProfile = 'bambuddy'
         $bambuddyUrl    = 'http://bambuddy:8000'
         Write-Success "Bambuddy will be installed as part of this setup"
-        Write-Host "  After setup, open http://localhost:8000 to add your printer." -ForegroundColor DarkGray
+        Write-Host "  After setup, open http://localhost:8000 to configure your printer in Bambuddy." -ForegroundColor DarkGray
     }
 
-    # Timezone
+    # ── Timezone ──────────────────────────────────────────────────────────────
     $tz = 'UTC'
     try {
         $tzMap = @{
@@ -148,12 +210,12 @@ if (-not $skipEnv) {
         $tz = if ($tzMap.ContainsKey($winTz)) { $tzMap[$winTz] } else { 'UTC' }
     } catch { }
 
-    # Write .env
+    # ── Write .env ────────────────────────────────────────────────────────────
     $envContent = @"
 # NeuSlice Node Configuration
 # Generated by install.ps1 on $(Get-Date -Format 'yyyy-MM-dd HH:mm')
 
-# Your agent token from the NeuSlice dashboard
+# Agent credentials (auto-configured — do not share)
 NEUSLICE_TOKEN=$agentToken
 NEUSLICE_NODE_ID=$nodeId
 
@@ -164,7 +226,6 @@ BAMBUDDY_BASE_URL=$bambuddyUrl
 TZ=$tz
 "@
 
-    # Add compose profile if we're managing Bambuddy
     if ($composeProfile -ne '') {
         $envContent += "`n# Enable Bambuddy container (managed by NeuSlice)"
         $envContent += "`nCOMPOSE_PROFILES=$composeProfile"
@@ -190,7 +251,6 @@ Write-Host ""
 Write-Host "  ✓ NeuSlice node is running!" -ForegroundColor Green
 Write-Host ""
 
-# Check if they need to set up Bambuddy
 $profile = ''
 if (Test-Path '.env') {
     $profileLine = Get-Content '.env' | Where-Object { $_ -match '^COMPOSE_PROFILES=' }
@@ -202,7 +262,7 @@ if ($profile -match 'bambuddy') {
 }
 
 Write-Host "  Your printer will appear online in the NeuSlice dashboard shortly."
-Write-Host "  Updates are automatic - no action needed when NeuSlice releases new versions."
+Write-Host "  Updates are automatic — no action needed when NeuSlice releases new versions."
 Write-Host ""
 Write-Host "  Useful commands (run from $INSTALL_DIR):" -ForegroundColor DarkGray
 Write-Host "    View logs:    docker compose logs -f neuslice-agent"
