@@ -89,6 +89,15 @@ if [ "$SKIP_ENV" = false ]; then
         [ -z "$NEUSLICE_TOKEN" ] && warn "Token cannot be empty."
     done
 
+    echo ""
+    dim "Your Node ID is shown alongside your Agent Token in the dashboard."
+    echo ""
+    NEUSLICE_NODE_ID=""
+    while [ -z "$NEUSLICE_NODE_ID" ]; do
+        read -rp "  Paste your Node ID: " NEUSLICE_NODE_ID
+        [ -z "$NEUSLICE_NODE_ID" ] && warn "Node ID cannot be empty."
+    done
+
     # Bambuddy
     echo ""
     dim "Bambuddy manages communication between NeuSlice and your printer."
@@ -119,6 +128,7 @@ if [ "$SKIP_ENV" = false ]; then
 
 # Your agent token from the NeuSlice dashboard
 NEUSLICE_TOKEN=${NEUSLICE_TOKEN}
+NEUSLICE_NODE_ID=${NEUSLICE_NODE_ID}
 
 # Bambuddy connection URL
 BAMBUDDY_BASE_URL=${BAMBUDDY_URL}

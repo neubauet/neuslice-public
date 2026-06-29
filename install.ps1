@@ -104,6 +104,15 @@ if (-not $skipEnv) {
         if ($agentToken -eq '') { Write-Warn "Token cannot be empty." }
     }
 
+    Write-Host ""
+    Write-Host "  Your Node ID is shown alongside your Agent Token in the dashboard." -ForegroundColor DarkGray
+    Write-Host ""
+    $nodeId = ''
+    while ($nodeId -eq '') {
+        $nodeId = Read-Host "  Paste your Node ID"
+        if ($nodeId -eq '') { Write-Warn "Node ID cannot be empty." }
+    }
+
     # Bambuddy
     Write-Host ""
     Write-Host "  Bambuddy manages communication between NeuSlice and your printer." -ForegroundColor DarkGray
@@ -146,6 +155,7 @@ if (-not $skipEnv) {
 
 # Your agent token from the NeuSlice dashboard
 NEUSLICE_TOKEN=$agentToken
+NEUSLICE_NODE_ID=$nodeId
 
 # Bambuddy connection URL
 BAMBUDDY_BASE_URL=$bambuddyUrl

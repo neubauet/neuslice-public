@@ -70,7 +70,7 @@ services:
   # Handles automatic agent updates. No firewall rules needed — updates
   # arrive over the agent's existing outbound WebSocket connection.
   watchtower:
-    image: containrrr/watchtower:latest
+    image: containrrr/watchtower:1.7.1
     container_name: watchtower
     restart: unless-stopped
     volumes:
