@@ -101,6 +101,20 @@ $skipEnv = $false
 if ((Test-Path '.env') -and (Select-String -Path '.env' -Pattern '^NEUSLICE_TOKEN=' -Quiet)) {
     $existingToken = (Get-Content '.env' | Where-Object { $_ -match '^NEUSLICE_TOKEN=' }) -replace '^NEUSLICE_TOKEN=', ''
     Write-Warn "Existing .env found (token: $($existingToken.Substring(0, [Math]::Min(8, $existingToken.Length)))...)."
+
+    # Check if BAMBUDDY_BASE_URL points to localhost — that won't work inside Docker
+    $bambuddyLine = (Get-Content '.env' | Where-Object { $_ -match '^BAMBUDDY_BASE_URL=' })
+    if ($bambuddyLine -match 'localhost|127\.0\.0\.1') {
+        Write-Warn "Your .env has BAMBUDDY_BASE_URL pointing to localhost."
+        Write-Warn "Inside Docker, 'localhost' means the container, not your PC."
+        Write-Warn "This will be automatically updated to host.docker.internal."
+        $content = Get-Content '.env' -Raw
+        $content = $content -replace '(BAMBUDDY_BASE_URL=http://)localhost', '${1}host.docker.internal'
+        $content = $content -replace '(BAMBUDDY_BASE_URL=http://)127\.0\.0\.1', '${1}host.docker.internal'
+        $content | Set-Content -Path '.env' -Encoding UTF8 -NoNewline
+        Write-Success "Updated BAMBUDDY_BASE_URL to use host.docker.internal"
+    }
+
     if (Ask-YesNo "Keep existing configuration?") {
         Write-Success "Keeping existing configuration"
         $skipEnv = $true
@@ -213,8 +227,13 @@ if (-not $skipEnv) {
         Write-Host ""
 
         # URL
-        $customUrl = Read-Host "  Bambuddy URL (press Enter for http://localhost:${BAMBUDDY_PORT})"
-        $bambuddyUrl = if ($customUrl -ne '') { $customUrl.TrimEnd('/') } else { "http://localhost:${BAMBUDDY_PORT}" }
+        # Note: "localhost" inside Docker refers to the container itself, not the host.
+        # On Windows/Mac Docker Desktop, use host.docker.internal to reach host services.
+        $defaultBambuddyUrl = "http://host.docker.internal:${BAMBUDDY_PORT}"
+        Write-Dim "  (Bambuddy runs on your host machine — we use host.docker.internal so the agent"
+        Write-Dim "   container can reach it. Change only if Bambuddy is on a different machine.)"
+        $customUrl = Read-Host "  Bambuddy URL (press Enter for $defaultBambuddyUrl)"
+        $bambuddyUrl = if ($customUrl -ne '') { $customUrl.TrimEnd('/') } else { $defaultBambuddyUrl }
 
         # API key
         Write-Host ""
@@ -332,11 +351,23 @@ if (-not $skipEnv) {
 
 Write-Host ""
 Write-Header "Pulling Docker images (this may take a minute on first run)..."
-docker compose pull
+try {
+    docker compose pull
+    if ($LASTEXITCODE -ne 0) { throw "docker compose pull exited with code $LASTEXITCODE" }
+} catch {
+    Write-Warn "Image pull failed: $_"
+    Write-Warn "Continuing with locally cached images (if any)..."
+}
 
 Write-Host ""
 Write-Header "Starting NeuSlice node..."
 docker compose up -d
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Fail "'docker compose up -d' failed. Recent logs:"
+    docker compose logs --tail=30
+    exit 1
+}
 
 # ── 6. Path A: wait for Bambuddy, then pick printer ──────────────────────────
 

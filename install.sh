@@ -232,8 +232,19 @@ PYEOF
         echo ""
 
         # Bambuddy URL
-        read -rp "  Bambuddy URL (press Enter for http://localhost:${BAMBUDDY_PORT}): " CUSTOM_URL
-        BAMBUDDY_URL="${CUSTOM_URL:-http://localhost:${BAMBUDDY_PORT}}"
+        # On Mac (Docker Desktop), use host.docker.internal to reach host services from inside the container.
+        # On Linux with Docker Engine, host.docker.internal may not be available — use the host's LAN IP instead.
+        if [[ "$(uname)" == "Darwin" ]]; then
+            DEFAULT_BAMBUDDY_URL="http://host.docker.internal:${BAMBUDDY_PORT}"
+        else
+            # Try to detect the Docker bridge gateway IP (usually the host from inside containers on Linux)
+            HOST_IP=$(ip route show default 2>/dev/null | awk '/default/ {print $3}' | head -1)
+            DEFAULT_BAMBUDDY_URL="http://${HOST_IP:-host.docker.internal}:${BAMBUDDY_PORT}"
+        fi
+        dim "(Bambuddy runs on your host — we translate 'localhost' to the host's address so"
+        dim " the agent container can reach it. Change only if Bambuddy is on another machine.)"
+        read -rp "  Bambuddy URL (press Enter for $DEFAULT_BAMBUDDY_URL): " CUSTOM_URL
+        BAMBUDDY_URL="${CUSTOM_URL:-$DEFAULT_BAMBUDDY_URL}"
         BAMBUDDY_URL="${BAMBUDDY_URL%/}"   # strip trailing slash
 
         # API key
@@ -344,11 +355,16 @@ fi
 
 echo ""
 header "Pulling Docker images (this may take a minute on first run)..."
-docker compose pull
+docker compose pull || {
+    warn "Image pull failed — continuing with locally cached images (if any)..."
+}
 
 echo ""
 header "Starting NeuSlice node..."
-docker compose up -d
+docker compose up -d || {
+    echo ""
+    fail "'docker compose up -d' failed. Recent logs:\n$(docker compose logs --tail=30 2>&1)"
+}
 
 # ── 6. Path A: wait for Bambuddy, then pick printer ──────────────────────────
 
