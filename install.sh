@@ -264,7 +264,7 @@ PYEOF
 
         PRINTERS_JSON=$(curl -fsSL \
             -H "X-API-Key: $BAMBU_API_KEY" \
-            "${BAMBUDDY_URL}/api/v1/printers") \
+            "${BAMBUDDY_URL}/api/v1/printers/") \
             || fail "Could not reach Bambuddy at ${BAMBUDDY_URL}. Check the URL and make sure Bambuddy is running."
 
         PRINTER_COUNT=$(json_array_len "$PRINTERS_JSON")
@@ -373,7 +373,7 @@ if grep -q "^COMPOSE_PROFILES=bambuddy" .env 2>/dev/null; then
     header "Waiting for Bambuddy to start..."
     BAMBUDDY_HOST_URL="http://localhost:${BAMBUDDY_PORT}"
     ELAPSED=0
-    until curl -fsSL --max-time 2 "${BAMBUDDY_HOST_URL}/api/v1/printers" &>/dev/null; do
+    until curl -fsSL --max-time 2 "${BAMBUDDY_HOST_URL}/api/v1/printers/" &>/dev/null; do
         if [ "$ELAPSED" -ge "$BAMBUDDY_READY_TIMEOUT" ]; then
             warn "Bambuddy didn't respond within ${BAMBUDDY_READY_TIMEOUT}s."
             warn "Open http://localhost:${BAMBUDDY_PORT} to add your printer manually."
@@ -386,7 +386,7 @@ if grep -q "^COMPOSE_PROFILES=bambuddy" .env 2>/dev/null; then
     done
 
     echo ""
-    PRINTERS_JSON=$(curl -fsSL --max-time 5 "${BAMBUDDY_HOST_URL}/api/v1/printers" 2>/dev/null || echo "[]")
+    PRINTERS_JSON=$(curl -fsSL --max-time 5 "${BAMBUDDY_HOST_URL}/api/v1/printers/" 2>/dev/null || echo "[]")
     PRINTER_COUNT=$(json_array_len "$PRINTERS_JSON")
 
     if [ "$PRINTER_COUNT" -eq 0 ]; then

@@ -252,12 +252,19 @@ if (-not $skipEnv) {
 
         try {
             $printersResponse = Invoke-RestMethod `
-                -Uri "${bambuddyUrl}/api/v1/printers" `
+                -Uri "${bambuddyUrl}/api/v1/printers/" `
                 -Headers @{ 'X-API-Key' = $bambuApiKey } `
                 -Method Get `
+                -MaximumRedirection 5 `
                 -ErrorAction Stop
         } catch {
-            Write-Fail "Could not reach Bambuddy at ${bambuddyUrl}. Check the URL and that Bambuddy is running."
+            $sc = $_.Exception.Response.StatusCode.value__
+            $body = ''
+            try {
+                $reader = [System.IO.StreamReader]::new($_.Exception.Response.GetResponseStream())
+                $body = $reader.ReadToEnd()
+            } catch { }
+            Write-Fail "Could not reach Bambuddy at ${bambuddyUrl} (HTTP $sc). Response: $body"
         }
 
         $printers = @($printersResponse)   # ensure array even for single item
@@ -387,8 +394,8 @@ if ($isPathA) {
 
     while ($elapsed -lt $BAMBUDDY_READY_TIMEOUT) {
         try {
-            $null = Invoke-RestMethod -Uri "${bambuddyLocal}/api/v1/printers" `
-                -Method Get -TimeoutSec 2 -ErrorAction Stop
+            $null = Invoke-RestMethod -Uri "${bambuddyLocal}/api/v1/printers/" `
+                -Method Get -MaximumRedirection 5 -TimeoutSec 2 -ErrorAction Stop
             $ready = $true
             break
         } catch { }
@@ -406,8 +413,8 @@ if ($isPathA) {
         Write-Warn "Then restart the agent: docker compose restart neuslice-agent"
     } else {
         try {
-            $printers = @(Invoke-RestMethod -Uri "${bambuddyLocal}/api/v1/printers" `
-                -Method Get -ErrorAction Stop)
+            $printers = @(Invoke-RestMethod -Uri "${bambuddyLocal}/api/v1/printers/" `
+                -Method Get -MaximumRedirection 5 -ErrorAction Stop)
         } catch {
             $printers = @()
         }
