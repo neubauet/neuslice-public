@@ -82,6 +82,7 @@ services:
       WATCHTOWER_SCOPE: neuslice-agent
       WATCHTOWER_CLEANUP: "true"
       WATCHTOWER_LOG_LEVEL: info
+      DOCKER_API_VERSION: "1.45"
     ports:
       - "127.0.0.1:8080:8080"
     networks:
