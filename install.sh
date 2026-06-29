@@ -105,6 +105,28 @@ if [ -f .env ] && grep -q "^NEUSLICE_TOKEN=" .env; then
         ok "Added WATCHTOWER_TOKEN to existing .env"
     fi
 
+    # Ensure BAMBU_USERNAME/PASSWORD exist (older installs won't have them)
+    if grep -q "^BAMBU_API_KEY=" .env && ! grep -q "^BAMBU_USERNAME=" .env; then
+        echo ""
+        info "Your .env is missing Bambuddy login credentials (needed for file upload)."
+        dim  "(These are the username and password for the Bambuddy web UI.)"
+        echo ""
+        UP_USER=""
+        while [ -z "$UP_USER" ]; do
+            read -rp "  Bambuddy Username: " UP_USER
+            [ -z "$UP_USER" ] && warn "Username cannot be empty."
+        done
+        UP_PASS=""
+        while [ -z "$UP_PASS" ]; do
+            read -rsp "  Bambuddy Password: " UP_PASS
+            echo ""
+            [ -z "$UP_PASS" ] && warn "Password cannot be empty."
+        done
+        printf "\nBAMBU_USERNAME=%s\n" "$UP_USER" >> .env
+        printf "BAMBU_PASSWORD=%s\n" "$UP_PASS" >> .env
+        ok "Added BAMBU_USERNAME and BAMBU_PASSWORD to existing .env"
+    fi
+
     if ask_yn "Keep existing configuration?"; then
         ok "Keeping existing configuration"
         SKIP_ENV=true
@@ -214,6 +236,8 @@ PYEOF
     COMPOSE_PROFILE=""
     BAMBUDDY_URL=""
     BAMBU_API_KEY=""
+    BAMBU_USERNAME=""
+    BAMBU_PASSWORD=""
     BAMBU_PRINTER_ID=""
 
     if [ "$HAS_BAMBUDDY_RAW" = "False" ] || [ "$HAS_BAMBUDDY_RAW" = "false" ]; then
@@ -264,6 +288,23 @@ PYEOF
         while [ -z "$BAMBU_API_KEY" ]; do
             read -rp "  Bambuddy API Key: " BAMBU_API_KEY
             [ -z "$BAMBU_API_KEY" ] && warn "API key cannot be empty."
+        done
+
+        # Bambuddy login credentials (needed for file upload — API key alone is not enough)
+        echo ""
+        info "Bambuddy requires a username and password to upload print files."
+        dim  "(These are the credentials you use to log into the Bambuddy web UI.)"
+        echo ""
+        BAMBU_USERNAME=""
+        while [ -z "$BAMBU_USERNAME" ]; do
+            read -rp "  Bambuddy Username: " BAMBU_USERNAME
+            [ -z "$BAMBU_USERNAME" ] && warn "Username cannot be empty."
+        done
+        BAMBU_PASSWORD=""
+        while [ -z "$BAMBU_PASSWORD" ]; do
+            read -rsp "  Bambuddy Password: " BAMBU_PASSWORD
+            echo ""
+            [ -z "$BAMBU_PASSWORD" ] && warn "Password cannot be empty."
         done
 
         # Fetch printer list from Bambuddy

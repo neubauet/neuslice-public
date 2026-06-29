@@ -122,6 +122,30 @@ if ((Test-Path '.env') -and (Select-String -Path '.env' -Pattern '^NEUSLICE_TOKE
         Write-Success "Added WATCHTOWER_TOKEN to existing .env"
     }
 
+    # Ensure BAMBU_USERNAME/PASSWORD exist (older installs won't have them)
+    if ((Select-String -Path '.env' -Pattern '^BAMBU_API_KEY=' -Quiet) -and
+        -not (Select-String -Path '.env' -Pattern '^BAMBU_USERNAME=' -Quiet)) {
+        Write-Host ""
+        Write-Info "Your .env is missing Bambuddy login credentials (needed for file upload)."
+        Write-Dim "These are the username and password you use to log into the Bambuddy web UI."
+        Write-Host ""
+        $upUser = ''
+        while ($upUser -eq '') {
+            $upUser = Read-Host "  Bambuddy Username"
+            if ($upUser -eq '') { Write-Warn "Username cannot be empty." }
+        }
+        $upPass = ''
+        while ($upPass -eq '') {
+            $upPass = Read-Host "  Bambuddy Password" -AsSecureString | `
+                ForEach-Object { [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+                    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($_)) }
+            if ($upPass -eq '') { Write-Warn "Password cannot be empty." }
+        }
+        Add-Content -Path '.env' -Value "`nBAMBU_USERNAME=$upUser"
+        Add-Content -Path '.env' -Value "BAMBU_PASSWORD=$upPass"
+        Write-Success "Added BAMBU_USERNAME and BAMBU_PASSWORD to existing .env"
+    }
+
     if (Ask-YesNo "Keep existing configuration?") {
         Write-Success "Keeping existing configuration"
         $skipEnv = $true
@@ -215,6 +239,8 @@ if (-not $skipEnv) {
     $composeProfile  = ''
     $bambuddyUrl     = ''
     $bambuApiKey     = ''
+    $bambuUsername   = ''
+    $bambuPassword   = ''
     $bambuPrinterId  = ''
 
     if (-not $hasBambuddy) {
@@ -251,6 +277,24 @@ if (-not $skipEnv) {
         while ($bambuApiKey -eq '') {
             $bambuApiKey = Read-Host "  Bambuddy API Key"
             if ($bambuApiKey -eq '') { Write-Warn "API key cannot be empty." }
+        }
+
+        # Bambuddy login credentials (needed for file upload — API key alone is not enough)
+        Write-Host ""
+        Write-Dim "Bambuddy requires a username and password to upload print files."
+        Write-Dim "(These are the credentials you use to log into the Bambuddy web UI.)"
+        Write-Host ""
+        $bambuUsername = ''
+        while ($bambuUsername -eq '') {
+            $bambuUsername = Read-Host "  Bambuddy Username"
+            if ($bambuUsername -eq '') { Write-Warn "Username cannot be empty." }
+        }
+        $bambuPassword = ''
+        while ($bambuPassword -eq '') {
+            $bambuPassword = Read-Host "  Bambuddy Password" -AsSecureString | `
+                ForEach-Object { [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+                    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($_)) }
+            if ($bambuPassword -eq '') { Write-Warn "Password cannot be empty." }
         }
 
         # Fetch printer list
@@ -349,6 +393,8 @@ if (-not $skipEnv) {
         $envLines += ""
         $envLines += "# Bambuddy API credentials (Path B — existing install)"
         $envLines += "BAMBU_API_KEY=$bambuApiKey"
+        $envLines += "BAMBU_USERNAME=$bambuUsername"
+        $envLines += "BAMBU_PASSWORD=$bambuPassword"
     }
 
     if ($bambuPrinterId -ne '') {
