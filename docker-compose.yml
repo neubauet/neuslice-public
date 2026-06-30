@@ -2,11 +2,12 @@
 # NeuSlice Printer Node — Docker Compose Stack
 #
 # Services:
-#   - neuslice-agent : NeuSlice marketplace bridge (always runs)
-#   - watchtower     : automatic agent self-updates (always runs)
-#   - bambuddy       : printer management UI — OPTIONAL
-#                      Only starts when COMPOSE_PROFILES=bambuddy is set.
-#                      Skip if you already have Bambuddy running separately.
+#   - docker-socket-proxy : security layer — limits agent's Docker API access
+#   - neuslice-agent      : NeuSlice marketplace bridge (always runs)
+#   - watchtower          : automatic agent self-updates (always runs)
+#   - bambuddy            : printer management UI — OPTIONAL
+#                           Only starts when COMPOSE_PROFILES=bambuddy is set.
+#                           Skip if you already have Bambuddy running separately.
 #
 # The installer sets COMPOSE_PROFILES automatically based on your answer
 # to "Do you already have Bambuddy installed?"
@@ -18,6 +19,44 @@
 
 services:
 
+  # ── Docker Socket Proxy (security: limits agent's Docker API access) ─────
+  # The agent talks to this proxy instead of the raw Docker socket.
+  # Only the API methods the agent actually needs are permitted — everything
+  # else (exec, volumes, networks, swarm, secrets) is denied.
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.2.0
+    container_name: docker-socket-proxy
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      CONTAINERS: 1
+      POST:       1
+      IMAGES:     1
+      AUTH:         0
+      SECRETS:      0
+      NETWORKS:     0
+      VOLUMES:      0
+      EXEC:         0
+      SWARM:        0
+      TASKS:        0
+      SERVICES:     0
+      CONFIGS:      0
+      DISTRIBUTION: 0
+      SESSION:      0
+      SYSTEM:       0
+      BUILD:        0
+      COMMIT:       0
+      NODES:        0
+      PLUGINS:      0
+    networks:
+      - socket_proxy_net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
   # ── Bambuddy (optional) ───────────────────────────────────────────────────
   # Only starts when COMPOSE_PROFILES=bambuddy (set by installer).
   # If you already have Bambuddy running, set BAMBUDDY_BASE_URL in .env
@@ -28,7 +67,7 @@ services:
     container_name: bambuddy
     restart: unless-stopped
     ports:
-      - "8000:8000"     # Bambuddy web UI + REST API
+      - "8000:8000"
     volumes:
       - bambuddy_data:/data
     environment:
@@ -50,14 +89,24 @@ services:
     depends_on:
       watchtower:
         condition: service_started
+      docker-socket-proxy:
+        condition: service_started
     env_file:
       - .env
     environment:
       NODE_ENV: production
       WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_TOKEN}
+      WATCHTOWER_HOST: watchtower
       WATCHTOWER_PORT: "8080"
+      DOCKER_SOCKET: tcp://docker-socket-proxy:2375
+      NEUSLICE_PROJECT_DIR: /neuslice-project
+    volumes:
+      - .:/neuslice-project
+    labels:
+      com.centurylinklabs.watchtower.scope: neuslice
     networks:
       - neuslice_net
+      - socket_proxy_net
     logging:
       driver: "json-file"
       options:
@@ -65,8 +114,6 @@ services:
         max-file: "3"
 
   # ── Watchtower ────────────────────────────────────────────────────────────
-  # Handles automatic agent updates. No firewall rules needed — updates
-  # arrive over the agent's existing outbound WebSocket connection.
   watchtower:
     image: containrrr/watchtower:1.7.1
     container_name: watchtower
@@ -77,12 +124,12 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       WATCHTOWER_HTTP_API_UPDATE: "true"
-      WATCHTOWER_SCOPE: neuslice-agent
+      WATCHTOWER_POLL_INTERVAL: "300"
+      WATCHTOWER_SCOPE: neuslice
+      WATCHTOWER_LABEL_ENABLE: "true"
       WATCHTOWER_CLEANUP: "true"
       WATCHTOWER_LOG_LEVEL: info
       DOCKER_API_VERSION: "1.45"
-      # WATCHTOWER_HTTP_API_TOKEN is injected via env_file .env
-      # .env must contain: WATCHTOWER_HTTP_API_TOKEN=<token>
     ports:
       - "127.0.0.1:8080:8080"
     networks:
@@ -93,11 +140,14 @@ services:
         max-size: "5m"
         max-file: "2"
 
-# ── Volumes ───────────────────────────────────────────────────────────────
+# ── Volumes ───────────────────────────────────────────────────────────────────
 volumes:
   bambuddy_data:
 
-# ── Network ───────────────────────────────────────────────────────────────
+# ── Networks ──────────────────────────────────────────────────────────────────
 networks:
   neuslice_net:
     driver: bridge
+  socket_proxy_net:
+    driver: bridge
+    internal: true
