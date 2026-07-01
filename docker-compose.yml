@@ -114,6 +114,19 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # ── Watchtower trigger — fires an immediate update check on stack startup ──
+  watchtower-trigger:
+    image: curlimages/curl:8.7.1
+    container_name: watchtower-trigger
+    restart: "no"
+    depends_on:
+      - watchtower
+    networks:
+      - neuslice_net
+    entrypoint: >
+      sh -c "sleep 5 && curl -sf -X POST http://watchtower:8080/v1/update
+      -H 'Authorization: Bearer ${WATCHTOWER_HTTP_API_TOKEN}' && echo 'Watchtower initial update triggered'"
+
   # ── Watchtower ────────────────────────────────────────────────────────────
   watchtower:
     image: containrrr/watchtower:1.7.1
