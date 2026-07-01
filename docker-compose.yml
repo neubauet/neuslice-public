@@ -104,6 +104,7 @@ services:
       - .:/neuslice-project
     labels:
       com.centurylinklabs.watchtower.scope: neuslice
+      com.centurylinklabs.watchtower.enable: "true"
     networks:
       - neuslice_net
       - socket_proxy_net
