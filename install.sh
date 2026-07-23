@@ -263,21 +263,39 @@ PYEOF
         info "You indicated Bambuddy is already installed."
         echo ""
 
-        # Bambuddy URL
-        # On Mac (Docker Desktop), use host.docker.internal to reach host services from inside the container.
-        # On Linux with Docker Engine, host.docker.internal may not be available — use the host's LAN IP instead.
-        if [[ "$(uname)" == "Darwin" ]]; then
-            DEFAULT_BAMBUDDY_URL="http://host.docker.internal:${BAMBUDDY_PORT}"
-        else
-            # Try to detect the Docker bridge gateway IP (usually the host from inside containers on Linux)
-            HOST_IP=$(ip route show default 2>/dev/null | awk '/default/ {print $3}' | head -1)
-            DEFAULT_BAMBUDDY_URL="http://${HOST_IP:-host.docker.internal}:${BAMBUDDY_PORT}"
-        fi
-        dim "(Bambuddy runs on your host — we translate 'localhost' to the host's address so"
-        dim " the agent container can reach it. Change only if Bambuddy is on another machine.)"
+        # Bambuddy URL — the SAME Bambuddy needs TWO addresses, because two
+        # different clients reach it:
+        #   1. THIS installer, on the host, curls Bambuddy to validate + list
+        #      printers            → needs a HOST-reachable address
+        #   2. the agent CONTAINER, at runtime, curls it for every print
+        #      → 'localhost' there is the container itself, so it needs an
+        #        address that reaches the host FROM a container
+        # host.docker.internal does NOT resolve from the host shell on macOS, so
+        # defaulting to it (as this once did) made the validation curl below fail
+        # with "Could not resolve host". Instead we ask for the URL as the user
+        # reaches it here (localhost), validate THAT, and translate only a loopback
+        # host to a container-reachable address for .env:
+        #   macOS / Windows Docker Desktop → host.docker.internal
+        #   Linux Docker Engine            → default-route gateway (fallback host.docker.internal)
+        # A real LAN IP or remote hostname reaches both, so it is left unchanged.
+        DEFAULT_BAMBUDDY_URL="http://localhost:${BAMBUDDY_PORT}"
+        dim "(Enter the URL as you reach Bambuddy on THIS machine — usually localhost."
+        dim " We translate it to a container-reachable address for the agent automatically.)"
         read -rp "  Bambuddy URL (press Enter for $DEFAULT_BAMBUDDY_URL): " CUSTOM_URL
-        BAMBUDDY_URL="${CUSTOM_URL:-$DEFAULT_BAMBUDDY_URL}"
-        BAMBUDDY_URL="${BAMBUDDY_URL%/}"   # strip trailing slash
+        BAMBUDDY_VALIDATE_URL="${CUSTOM_URL:-$DEFAULT_BAMBUDDY_URL}"
+        BAMBUDDY_VALIDATE_URL="${BAMBUDDY_VALIDATE_URL%/}"   # strip trailing slash
+
+        # Container-reachable address written to .env (see note above).
+        if [[ "$(uname)" == "Darwin" ]]; then
+            HOST_ADDR="host.docker.internal"
+        else
+            HOST_ADDR=$(ip route show default 2>/dev/null | awk '/default/ {print $3}' | head -1)
+            HOST_ADDR="${HOST_ADDR:-host.docker.internal}"
+        fi
+        BAMBUDDY_URL=$(printf '%s' "$BAMBUDDY_VALIDATE_URL" \
+            | sed -E "s#://(localhost|127\.0\.0\.1)([:/]|\$)#://${HOST_ADDR}\2#")
+        [ "$BAMBUDDY_URL" != "$BAMBUDDY_VALIDATE_URL" ] && \
+            dim "Agent container will reach Bambuddy at $BAMBUDDY_URL"
 
         # API key
         echo ""
@@ -311,15 +329,17 @@ PYEOF
         echo ""
         header "Fetching printers from Bambuddy..."
 
+        # Validate against the HOST-reachable URL the user entered — NOT the
+        # translated container URL, which may not resolve from the host (macOS).
         PRINTERS_JSON=$(curl -fsSL \
             -H "X-API-Key: $BAMBU_API_KEY" \
-            "${BAMBUDDY_URL}/api/v1/printers/") \
-            || fail "Could not reach Bambuddy at ${BAMBUDDY_URL}. Check the URL and make sure Bambuddy is running."
+            "${BAMBUDDY_VALIDATE_URL}/api/v1/printers/") \
+            || fail "Could not reach Bambuddy at ${BAMBUDDY_VALIDATE_URL}. Check the URL and make sure Bambuddy is running."
 
         PRINTER_COUNT=$(json_array_len "$PRINTERS_JSON")
 
         if [ "$PRINTER_COUNT" -eq 0 ]; then
-            fail "No printers found in Bambuddy at ${BAMBUDDY_URL}. Add your printer in Bambuddy first, then re-run."
+            fail "No printers found in Bambuddy at ${BAMBUDDY_VALIDATE_URL}. Add your printer in Bambuddy first, then re-run."
         elif [ "$PRINTER_COUNT" -eq 1 ]; then
             BAMBU_PRINTER_ID=$(json_array_field "$PRINTERS_JSON" 0 "id")
             PRINTER_NAME=$(json_array_field "$PRINTERS_JSON" 0 "name")
