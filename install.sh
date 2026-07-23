@@ -105,6 +105,13 @@ if [ -f .env ] && grep -q "^NEUSLICE_TOKEN=" .env; then
         ok "Added WATCHTOWER_TOKEN to existing .env"
     fi
 
+    # Ensure NEUSLICE_API_URL exists (pre-fix installs lack it; the agent
+    # requires it explicitly and crash-loops without it).
+    if ! grep -q "^NEUSLICE_API_URL=" .env; then
+        echo "NEUSLICE_API_URL=$BACKEND_URL" >> .env
+        ok "Added NEUSLICE_API_URL to existing .env"
+    fi
+
     # Ensure BAMBU_USERNAME/PASSWORD exist (older installs won't have them)
     if grep -q "^BAMBU_API_KEY=" .env && ! grep -q "^BAMBU_USERNAME=" .env; then
         echo ""
@@ -389,6 +396,7 @@ PYEOF
 # Agent credentials (auto-configured — do not share)
 NEUSLICE_TOKEN=${AGENT_TOKEN}
 NEUSLICE_NODE_ID=${NODE_ID}
+NEUSLICE_API_URL=${BACKEND_URL}
 
 # Watchtower update token (shared secret between agent and watchtower)
 WATCHTOWER_HTTP_API_TOKEN=${WATCHTOWER_HTTP_API_TOKEN}
