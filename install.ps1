@@ -35,9 +35,34 @@ $INSTALL_DIR           = if ($env:NEUSLICE_DIR) { $env:NEUSLICE_DIR } else { "$e
 function Write-Header  { Write-Host "`n  $args" -ForegroundColor White }
 function Write-Success { Write-Host "  [OK] $args" -ForegroundColor Green }
 function Write-Warn    { Write-Host "  [!]  $args" -ForegroundColor Yellow }
-function Write-Fail    { Write-Host "  [X]  $args" -ForegroundColor Red; exit 1 }
+function Write-Fail    { $script:CleanFail = $true; Write-Host "  [X]  $args" -ForegroundColor Red; exit 1 }
 function Write-Info    { Write-Host "  $args" -ForegroundColor Cyan }
 function Write-Dim     { Write-Host "  $args" -ForegroundColor DarkGray }
+
+# ── Transcript + failure reporting ────────────────────────────────────────────
+# The Windows counterpart of the ERR trap in install.sh. Without it a mid-script
+# failure prints a raw PowerShell error and leaves nothing to diagnose from —
+# the customer's console scrollback was the only record, and it is usually gone
+# by the time anyone asks.
+$script:CleanFail = $false
+if (-not (Test-Path $INSTALL_DIR)) { New-Item -ItemType Directory -Path $INSTALL_DIR -Force | Out-Null }
+$LOG_FILE = if ($env:NEUSLICE_LOG) { $env:NEUSLICE_LOG } else { Join-Path $INSTALL_DIR 'install.log' }
+try { Start-Transcript -Path $LOG_FILE -Append | Out-Null } catch { }
+
+trap {
+    if (-not $script:CleanFail) {
+        Write-Host ""
+        Write-Host "  [X]  Install failed at line $($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor Red
+        if ($_.InvocationInfo.Line) {
+            Write-Host ("        command: " + $_.InvocationInfo.Line.Trim()) -ForegroundColor Red
+        }
+        Write-Host ("        " + $_.Exception.Message) -ForegroundColor Red
+        Write-Host "        full transcript: $LOG_FILE" -ForegroundColor DarkGray
+        Write-Host "        (safe to share - credentials go to .env, never the console)" -ForegroundColor DarkGray
+    }
+    try { Stop-Transcript | Out-Null } catch { }
+    exit 1
+}
 function Ask-YesNo {
     param([string]$Prompt, [bool]$Default = $true)
     $hint = if ($Default) { '[Y/n]' } else { '[y/N]' }
