@@ -1,20 +1,44 @@
 ##############################################################################
 # NeuSlice Printer Node — Docker Compose Stack
 #
-# Services:
-#   - docker-socket-proxy : security layer — limits agent's Docker API access
-#   - neuslice-agent      : NeuSlice marketplace bridge (always runs)
-#   - watchtower          : automatic agent self-updates (always runs)
-#   - bambuddy            : printer management UI — OPTIONAL
-#                           Only starts when COMPOSE_PROFILES=bambuddy is set.
-#                           Skip if you already have Bambuddy running separately.
+# Supports one OR multiple printers on the same machine.
 #
-# The installer sets COMPOSE_PROFILES automatically based on your answer
-# to "Do you already have Bambuddy installed?"
+# ── Single printer (most common) ──────────────────────────────────────────
+#   Copy .env.example → .env, fill in your values, then:
+#     docker compose up -d
 #
-# Quick start (installer handles this for you):
-#   docker compose up -d                          # agent + watchtower only
-#   COMPOSE_PROFILES=bambuddy docker compose up -d # agent + watchtower + bambuddy
+# ── Multiple printers on one machine ──────────────────────────────────────
+#   Give each printer its own env file:
+#     .env.bambino        (Bambu Lab — PRINTER_ADAPTER=bambu)
+#     .env.klipper1       (Klipper   — PRINTER_ADAPTER=klipper)
+#     .env.klipper2       (second Klipper, different KLIPPER_HOST)
+#
+#   Then uncomment the additional agent blocks below and run:
+#     docker compose up -d
+#
+#   Each agent registers as a separate node in NeuSlice with its own token.
+#   Watchtower uses label-based scoping so it updates ALL neuslice agents
+#   automatically — no config changes needed when you add more.
+#
+# ── Bambuddy (optional, Bambu Lab only) ───────────────────────────────────
+#   Only starts when COMPOSE_PROFILES=bambuddy is set.
+#   Skip if you already have Bambuddy running separately — just set
+#   BAMBU_HOST in your .env to point to your existing instance.
+#
+#     docker compose up -d                          # agent + watchtower only
+#     COMPOSE_PROFILES=bambuddy docker compose up -d # + managed Bambuddy
+#
+# ── Security: Docker socket proxy ─────────────────────────────────────────
+#   The agent needs Docker API access to auto-deploy sibling containers for
+#   additional printers registered via the web UI.  Rather than mounting the
+#   raw Docker socket (which grants full host root access), we use a socket
+#   proxy that exposes ONLY the endpoints the agent actually needs:
+#     POST /containers/create   — spawn sibling agent container
+#     POST /containers/start    — start spawned container
+#     POST /images/create       — pull latest agent image before spawning
+#   All other Docker API paths are blocked (volumes, networks, exec, etc.).
+#   Watchtower still uses the raw socket because it needs to pull images and
+#   restart containers — but it is isolated to its own socket_proxy_net.
 ##############################################################################
 
 services:
@@ -23,6 +47,7 @@ services:
   # The agent talks to this proxy instead of the raw Docker socket.
   # Only the API methods the agent actually needs are permitted — everything
   # else (exec, volumes, networks, swarm, secrets) is denied.
+  # See: https://github.com/Tecnativa/docker-socket-proxy
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy:0.2.0
     container_name: docker-socket-proxy
@@ -30,9 +55,11 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      CONTAINERS: 1
-      POST:       1
-      IMAGES:     1
+      # Allow only what the agent needs for auto-deploy:
+      CONTAINERS: 1   # create, start, inspect containers
+      POST:       1   # allow POST requests (required for create/start/pull)
+      IMAGES:     1   # pull images before spawning
+      # Everything else is denied (default 0):
       AUTH:         0
       SECRETS:      0
       NETWORKS:     0
@@ -49,6 +76,7 @@ services:
       COMMIT:       0
       NODES:        0
       PLUGINS:      0
+    # Only reachable on the internal socket_proxy_net — never on the host
     networks:
       - socket_proxy_net
     logging:
@@ -57,12 +85,19 @@ services:
         max-size: "5m"
         max-file: "2"
 
-  # ── Bambuddy (optional) ───────────────────────────────────────────────────
-  # Only starts when COMPOSE_PROFILES=bambuddy (set by installer).
-  # If you already have Bambuddy running, set BAMBUDDY_BASE_URL in .env
-  # to point to it (e.g. http://192.168.1.50:8000) and skip this service.
+  # ── Bambuddy (optional, Bambu Lab only) ─────────────────────────────────
   bambuddy:
     profiles: [bambuddy]
+    # PINNED deliberately. This was `:latest`, and Watchtower polls every 5
+    # minutes — so an upstream release could take printing down at any hour
+    # with no action from us. On 2026-07-22 that happened: 0.2.4.x removed
+    # POST /archives/{id}/reprint (410 Gone), which the Bambu adapter used to
+    # start every print. Jobs failed after the owner accepted, releasing the
+    # customer's payment hold.
+    #
+    # Upgrade on purpose, not on a timer: bump this tag, verify a real print
+    # starts, then commit. The agent talks to Bambuddy's REST API, so its
+    # breaking changes are our outages.
     image: maziggy/bambuddy:0.2.4.9
     container_name: bambuddy
     restart: unless-stopped
@@ -81,7 +116,9 @@ services:
     networks:
       - neuslice_net
 
-  # ── NeuSlice Agent ────────────────────────────────────────────────────────
+  # ── NeuSlice Agent — Printer 1 (required) ───────────────────────────────
+  # Rename the service and container_name if you add more printers.
+  # Each agent needs its own env_file with a unique NEUSLICE_NODE_ID + token.
   neuslice-agent:
     image: medwiz159/neuslice:latest
     container_name: neuslice-agent
@@ -95,15 +132,29 @@ services:
       - .env
     environment:
       NODE_ENV: production
-      WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_HTTP_API_TOKEN:-}
-      WATCHTOWER_HOST: watchtower
+      WATCHTOWER_HOST: watchtower    # Docker service name — not localhost
       WATCHTOWER_PORT: "8080"
+      WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_HTTP_API_TOKEN:-}
+      # Auto-deploy: agent talks to the socket proxy over the internal
+      # socket_proxy_net — no raw Docker socket needed, no host escape possible.
       DOCKER_SOCKET: tcp://docker-socket-proxy:2375
+      # Tells the agent where to find the compose file to update when spawning
+      # sibling containers for additional printers.
       NEUSLICE_PROJECT_DIR: /neuslice-project
     volumes:
+      # No raw Docker socket mount — the agent uses docker-socket-proxy instead.
+      # Project directory — agent writes new service blocks to docker-compose.yml
+      # so spawned containers survive docker compose down && up.
+      # Replace the left side with the actual path to this directory on your host.
       - .:/neuslice-project
     labels:
+      # Watchtower label-scoping: only containers with this label are updated.
+      # Add this label to every neuslice-agent service you define below.
       com.centurylinklabs.watchtower.scope: neuslice
+      # REQUIRED, not decorative: watchtower runs with WATCHTOWER_LABEL_ENABLE=true,
+      # which makes it update ONLY containers carrying this label. Without it the
+      # agent is silently excluded from auto-updates — it keeps running the image
+      # it was first pulled with, forever, with no error anywhere.
       com.centurylinklabs.watchtower.enable: "true"
     networks:
       - neuslice_net
@@ -114,7 +165,77 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # ── NeuSlice Agent — Printer 2 (optional, uncomment to enable) ──────────
+  # Example: a Klipper printer alongside a Bambu Lab printer.
+  # Steps:
+  #   1. Copy .env.example → .env.klipper1 and fill in Klipper values
+  #   2. Register the printer at neuslice.com/printers to get a node_id + token
+  #   3. Add NEUSLICE_NODE_ID + NEUSLICE_TOKEN to .env.klipper1
+  #   4. Uncomment the block below and run: docker compose up -d
+  #
+  # neuslice-agent-klipper1:
+  #   image: medwiz159/neuslice:latest
+  #   container_name: neuslice-agent-klipper1
+  #   restart: unless-stopped
+  #   depends_on:
+  #     watchtower:
+  #       condition: service_started
+  #     docker-socket-proxy:
+  #       condition: service_started
+  #   env_file:
+  #     - .env.klipper1
+  #   environment:
+  #     NODE_ENV: production
+  #     WATCHTOWER_HOST: watchtower
+  #     WATCHTOWER_PORT: "8080"
+  #     WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_HTTP_API_TOKEN:-}
+  #     DOCKER_SOCKET: tcp://docker-socket-proxy:2375
+  #   labels:
+  #     com.centurylinklabs.watchtower.scope: neuslice
+  #   networks:
+  #     - neuslice_net
+  #     - socket_proxy_net
+  #   logging:
+  #     driver: "json-file"
+  #     options:
+  #       max-size: "10m"
+  #       max-file: "3"
+
+  # ── NeuSlice Agent — Printer 3 (optional, uncomment to enable) ──────────
+  # neuslice-agent-3:
+  #   image: medwiz159/neuslice:latest
+  #   container_name: neuslice-agent-3
+  #   restart: unless-stopped
+  #   depends_on:
+  #     watchtower:
+  #       condition: service_started
+  #     docker-socket-proxy:
+  #       condition: service_started
+  #   env_file:
+  #     - .env.printer3
+  #   environment:
+  #     NODE_ENV: production
+  #     WATCHTOWER_HOST: watchtower
+  #     WATCHTOWER_PORT: "8080"
+  #     WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_HTTP_API_TOKEN:-}
+  #     DOCKER_SOCKET: tcp://docker-socket-proxy:2375
+  #   labels:
+  #     com.centurylinklabs.watchtower.scope: neuslice
+  #   networks:
+  #     - neuslice_net
+  #     - socket_proxy_net
+  #   logging:
+  #     driver: "json-file"
+  #     options:
+  #       max-size: "10m"
+  #       max-file: "3"
+
   # ── Watchtower trigger — fires an immediate update check on stack startup ──
+  # One-shot helper: once the stack is up, pings Watchtower's HTTP API so a
+  # freshly installed node pulls the latest agent image right away instead of
+  # waiting up to WATCHTOWER_POLL_INTERVAL (5 min) for the first poll. It runs
+  # once and exits (restart: "no"); a non-zero curl is harmless — the periodic
+  # poll still catches the update on its next cycle.
   watchtower-trigger:
     image: curlimages/curl:8.7.1
     container_name: watchtower-trigger
@@ -128,24 +249,42 @@ services:
       -H 'Authorization: Bearer ${WATCHTOWER_HTTP_API_TOKEN}' && echo 'Watchtower initial update triggered'"
 
   # ── Watchtower ────────────────────────────────────────────────────────────
+  # Automatically updates all neuslice-agent containers when a new image is
+  # published. Uses label scoping so it only touches NeuSlice containers —
+  # it will not update other containers on the same machine.
+  #
+  # Watchtower needs the full Docker socket (not the proxy) because it must
+  # pull images and restart containers. It is isolated to its own internal
+  # socket_proxy_net and is not accessible from neuslice_net.
   watchtower:
     image: containrrr/watchtower:1.7.1
     container_name: watchtower
     restart: unless-stopped
-    env_file:
-      - .env
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       WATCHTOWER_HTTP_API_UPDATE: "true"
+      # Keep the periodic poll running alongside the HTTP API, so upstream tags
+      # are still caught on the 5-min cycle even between on-demand triggers
+      # (from the agent or watchtower-trigger).
       WATCHTOWER_HTTP_API_PERIODIC_POLLS: "true"
+      # Poll Docker Hub every 5 minutes for new image tags.
+      # Combined with HTTP API mode so the agent can also trigger on-demand.
       WATCHTOWER_POLL_INTERVAL: "300"
+      # Label-based scope: only updates containers with
+      # com.centurylinklabs.watchtower.scope=neuslice
       WATCHTOWER_SCOPE: neuslice
       WATCHTOWER_LABEL_ENABLE: "true"
       WATCHTOWER_CLEANUP: "true"
       WATCHTOWER_LOG_LEVEL: info
       DOCKER_API_VERSION: "1.45"
+      # Token is optional — leave blank to run without auth (LAN-only port binding below)
+      WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_HTTP_API_TOKEN:-}
     ports:
+      # Bind to localhost only — the agent calls this over the internal Docker
+      # network (watchtower:8080), but this mapping lets you trigger updates
+      # manually from the host with: curl -H "Authorization: Bearer $TOKEN" \
+      #   http://localhost:8080/v1/update
       - "127.0.0.1:8080:8080"
     networks:
       - neuslice_net
@@ -163,6 +302,9 @@ volumes:
 networks:
   neuslice_net:
     driver: bridge
+  # Isolated network for the Docker socket proxy.
+  # Only docker-socket-proxy and neuslice-agent join this network —
+  # nothing else can reach the Docker API through it.
   socket_proxy_net:
     driver: bridge
-    internal: true
+    internal: true   # no external routing; LAN/internet cannot reach this network
