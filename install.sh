@@ -158,6 +158,72 @@ if [ ${#MISSING_TOOLS[@]} -gt 0 ]; then
 fi
 ok "Required tools present"
 
+# ── Docker access ─────────────────────────────────────────────────────────────
+# get.docker.com installs Docker and starts the daemon, but it does NOT add the
+# invoking user to the `docker` group — it only prints a suggestion to. On Linux
+# the daemon socket is root:docker, so the very next `docker info` in THIS shell
+# fails with "permission denied", and a fresh single-run install can never get
+# past it. (Docker Desktop on macOS/Windows exposes the socket to the user
+# directly, which is why this went unnoticed there — that's where we test.)
+#
+# ensure_docker_access() makes the current run work in one shot:
+#   1. If we can already reach the daemon, do nothing.
+#   2. If the daemon is genuinely down, try to start it; else fail clearly.
+#   3. Otherwise it's a group-membership gap: add the user to `docker`, then run
+#      the rest of THIS run's docker commands through `sg docker` — which reads
+#      /etc/group fresh, so the group is usable immediately with no re-login. If
+#      `sg` can't (rare), fall back to sudo.
+# After this, every docker call goes through d() so it uses whatever access
+# method we resolved.
+DOCKER_SG=0
+DOCKER_SUDO=0
+DOCKER_GROUP_ADDED=0
+DOCKER_USER=""
+
+ensure_docker_access() {
+    docker info &>/dev/null && return 0
+
+    # Is the daemon actually down, or can we just not reach the socket? Check as
+    # root to tell them apart. If root can't reach it either, it's really down —
+    # try to start it (systemd hosts), then give up with an actionable message.
+    if ! sudo docker info &>/dev/null; then
+        sudo systemctl enable --now docker &>/dev/null || true
+        sudo docker info &>/dev/null || \
+            fail "Docker is installed but its daemon isn't running. Start it with: sudo systemctl enable --now docker  — then re-run."
+    fi
+
+    # Daemon is up; this session just lacks socket access. Resolve the real login
+    # user even if someone ran us under sudo (against our advice).
+    DOCKER_USER="${SUDO_USER:-$(id -un)}"
+    if [ "$DOCKER_USER" != "root" ] && \
+       ! id -nG "$DOCKER_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+        warn "Adding '$DOCKER_USER' to the 'docker' group..."
+        if sudo usermod -aG docker "$DOCKER_USER"; then
+            DOCKER_GROUP_ADDED=1
+        else
+            warn "Could not add '$DOCKER_USER' to the docker group — will use sudo for this run."
+        fi
+    fi
+
+    # Use the group NOW, without a re-login: `sg` reads /etc/group at exec time.
+    if [ "$DOCKER_USER" != "root" ] && sg docker -c 'docker info' &>/dev/null; then
+        DOCKER_SG=1
+    elif sudo docker info &>/dev/null; then
+        DOCKER_SUDO=1
+    else
+        fail "Docker is installed and running, but this account can't access it. Log out and back in (or reboot), then re-run."
+    fi
+}
+
+# Run a docker command through whatever access method ensure_docker_access chose.
+# In sg mode the command must be a single string, so quote every argument.
+d() {
+    if   [ "$DOCKER_SG" = 1 ];   then sg docker -c "$(printf '%q ' docker "$@")"
+    elif [ "$DOCKER_SUDO" = 1 ]; then sudo docker "$@"
+    else                              docker "$@"
+    fi
+}
+
 # ── 1. Check Docker ───────────────────────────────────────────────────────────
 
 header "Checking Docker..."
@@ -173,8 +239,12 @@ else
         ok "Docker found: $(docker --version)"
     fi
 
-    docker info &>/dev/null || fail "Docker is installed but not running. Start Docker and re-run."
-    docker compose version &>/dev/null || \
+    # Make sure THIS run can reach the daemon — including the common fresh-install
+    # case where Docker was just installed and the user's docker-group membership
+    # hasn't taken effect in this shell yet. (See ensure_docker_access above.)
+    ensure_docker_access
+
+    d compose version &>/dev/null || \
         fail "Docker Compose v2 required. Run: apt install docker-compose-plugin  or update Docker Desktop."
     ok "Docker Compose v2 available"
 fi
@@ -559,15 +629,15 @@ if [ "$NEUSLICE_DRY_RUN" = "1" ]; then
 else
     echo ""
     header "Pulling Docker images (this may take a minute on first run)..."
-    docker compose pull || {
+    d compose pull || {
         warn "Image pull failed — continuing with locally cached images (if any)..."
     }
 
     echo ""
     header "Starting NeuSlice node..."
-    docker compose up -d || {
+    d compose up -d || {
         echo ""
-        fail "'docker compose up -d' failed. Recent logs:\n$(docker compose logs --tail=30 2>&1)"
+        fail "'docker compose up -d' failed. Recent logs:\n$(d compose logs --tail=30 2>&1)"
     }
 fi
 
@@ -605,7 +675,7 @@ if [ "$NEUSLICE_DRY_RUN" != "1" ] && grep -q "^COMPOSE_PROFILES=bambuddy" .env 2
         PRINTER_NAME=$(json_array_field "$PRINTERS_JSON" 0 "name")
         echo "BAMBU_PRINTER_ID=${BAMBU_PRINTER_ID}" >> .env
         ok "Auto-selected printer: $PRINTER_NAME (ID $BAMBU_PRINTER_ID) — written to .env"
-        docker compose restart neuslice-agent &>/dev/null || true
+        d compose restart neuslice-agent &>/dev/null || true
         ok "Agent restarted with printer selection"
     else
         echo ""
@@ -629,7 +699,7 @@ if [ "$NEUSLICE_DRY_RUN" != "1" ] && grep -q "^COMPOSE_PROFILES=bambuddy" .env 2
                 PRINTER_NAME=$(json_array_field "$PRINTERS_JSON" $IDX "name")
                 echo "BAMBU_PRINTER_ID=${BAMBU_PRINTER_ID}" >> .env
                 ok "Selected: $PRINTER_NAME (ID $BAMBU_PRINTER_ID) — written to .env"
-                docker compose restart neuslice-agent &>/dev/null || true
+                d compose restart neuslice-agent &>/dev/null || true
                 ok "Agent restarted with printer selection"
                 break
             else
@@ -655,6 +725,18 @@ fi
 echo "  Your printer will appear online in the NeuSlice dashboard shortly."
 echo "  Updates are automatic — no action needed when NeuSlice releases new versions."
 echo ""
+
+# If we added the user to the docker group during THIS run, the node is already
+# up (we used `sg`/sudo to get here), but their *shell* won't have the group
+# until the next login — so the "Useful commands" below would fail with a
+# permission error in this same terminal. Tell them once.
+if [ "${DOCKER_GROUP_ADDED:-0}" = 1 ]; then
+    info "Added '${DOCKER_USER}' to the 'docker' group so you can manage the node without sudo."
+    dim "Your node is already running. To run the commands below in THIS terminal,"
+    dim "log out and back in once (or reboot) so the group applies to your shell."
+    echo ""
+fi
+
 dim "Useful commands (run from $INSTALL_DIR):"
 echo "    View logs:    docker compose logs -f neuslice-agent"
 echo "    Stop node:    docker compose down"
