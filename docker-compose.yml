@@ -147,6 +147,15 @@ services:
       # so spawned containers survive docker compose down && up.
       # Replace the left side with the actual path to this directory on your host.
       - .:/neuslice-project
+    extra_hosts:
+      # Makes host.docker.internal resolve on EVERY platform, so BAMBUDDY_BASE_URL
+      # can use one address everywhere. Docker Desktop (macOS/Windows) provides
+      # this name already; plain Docker Engine on Linux does NOT, and `host-gateway`
+      # is Docker's portable token for "the host". Without this the installer had
+      # to guess a Linux address via `ip route show default`, which returns the
+      # LAN router — not the bridge gateway — so Linux nodes pointed at the wrong
+      # host entirely.
+      - "host.docker.internal:host-gateway"
     labels:
       # Watchtower label-scoping: only containers with this label are updated.
       # Add this label to every neuslice-agent service you define below.

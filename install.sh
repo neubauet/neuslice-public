@@ -7,15 +7,26 @@
 # Manual run (opens dashboard in browser to register):
 #   curl -fsSL https://raw.githubusercontent.com/neubauet/neuslice-public/main/install.sh | bash
 
-set -euo pipefail
+# -E (errtrace) matters: without it the ERR trap below does NOT fire inside
+# functions or subshells, which is most of this script.
+set -Eeuo pipefail
 
-COMPOSE_URL="https://raw.githubusercontent.com/neubauet/neuslice-public/main/docker-compose.yml"
-DASHBOARD_URL="https://neuslice.com/nodes/register"
-BACKEND_URL="https://printshare-backend-234aeo2mva-uc.a.run.app"
-CALLBACK_PORT=9876
-BAMBUDDY_PORT=8000
-BAMBUDDY_READY_TIMEOUT=60   # seconds to wait for Bambuddy to start
+# ── Configuration ─────────────────────────────────────────────────────────────
+# Every value is env-overridable so CI and self-hosters can point at a mock or
+# a private backend without editing the script.
+COMPOSE_URL="${COMPOSE_URL:-https://raw.githubusercontent.com/neubauet/neuslice-public/main/docker-compose.yml}"
+DASHBOARD_URL="${DASHBOARD_URL:-https://neuslice.com/nodes/register}"
+BACKEND_URL="${BACKEND_URL:-https://printshare-backend-234aeo2mva-uc.a.run.app}"
+CALLBACK_PORT="${CALLBACK_PORT:-9876}"
+BAMBUDDY_PORT="${BAMBUDDY_PORT:-8000}"
+BAMBUDDY_READY_TIMEOUT="${BAMBUDDY_READY_TIMEOUT:-60}"   # seconds to wait for Bambuddy
 INSTALL_DIR="${NEUSLICE_DIR:-$HOME/.neuslice}"
+
+# Take every answer from the environment and never prompt. Used by CI, and by
+# owners scripting a multi-machine rollout.
+NEUSLICE_NONINTERACTIVE="${NEUSLICE_NONINTERACTIVE:-0}"
+# Exercise the whole flow without touching Docker (CI only).
+NEUSLICE_DRY_RUN="${NEUSLICE_DRY_RUN:-0}"
 
 BOLD="\033[1m"; GREEN="\033[32m"; YELLOW="\033[33m"; RED="\033[31m"
 CYAN="\033[36m"; GRAY="\033[90m"; RESET="\033[0m"
@@ -23,15 +34,78 @@ CYAN="\033[36m"; GRAY="\033[90m"; RESET="\033[0m"
 header() { echo -e "\n  ${BOLD}$*${RESET}"; }
 ok()     { echo -e "  ${GREEN}[OK]${RESET} $*"; }
 warn()   { echo -e "  ${YELLOW}[!]${RESET}  $*"; }
-fail()   { echo -e "  ${RED}[X]${RESET}  $*" >&2; exit 1; }
+fail()   { CLEAN_FAIL=1; echo -e "  ${RED}[X]${RESET}  $*" >&2; exit 1; }
 dim()    { echo -e "  ${GRAY}$*${RESET}"; }
 info()   { echo -e "  ${CYAN}$*${RESET}"; }
 
+# ── Transcript + failure reporting ────────────────────────────────────────────
+# Before this, every failure looked identical: `set -e` exited silently and the
+# terminal simply came back, with no message, no line number and no log. Six
+# separate installer bugs presented as "it connects, then drops to the terminal".
+mkdir -p "$INSTALL_DIR"
+LOG_FILE="${NEUSLICE_LOG:-$INSTALL_DIR/install.log}"
+printf '\n=== install run %s ===\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$LOG_FILE"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+CLEAN_FAIL=0
+on_error() {
+    local rc=$? line="$1" cmd="$2"
+    # fail() already printed something actionable — don't stack a second report.
+    [ "${CLEAN_FAIL:-0}" = "1" ] && return 0
+    # A failure inside $( ) fires ERR in the subshell AND again in the parent.
+    # Report only from the top level, where the command shown is the full
+    # assignment rather than the last fragment of its pipeline.
+    [ "${BASH_SUBSHELL:-0}" -gt 0 ] && return 0
+    echo "" >&2
+    echo -e "  ${RED}[X]${RESET}  Install failed at line ${line} (exit ${rc})" >&2
+    echo -e "        command: ${cmd}" >&2
+    echo -e "  ${GRAY}      full transcript: ${LOG_FILE}${RESET}" >&2
+    echo -e "  ${GRAY}      (safe to share — credentials are written to .env, never echoed)${RESET}" >&2
+}
+trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
+
+# ── Prompt helpers ────────────────────────────────────────────────────────────
+# Prompts talk to the terminal directly rather than through the log pipe above.
+# Two reasons: `read -p` writes its prompt to stderr, which tee can buffer so the
+# prompt never appears; and when this script is run as `curl ... | bash`, stdin
+# is the SCRIPT itself, not the user. Reading /dev/tty fixes both.
+HAVE_TTY=0
+if [ -r /dev/tty ] && [ -w /dev/tty ]; then HAVE_TTY=1; fi
+
+_no_tty_fail() {
+    fail "Need a value for $1, but this run is non-interactive. Set $1 in the environment (see NEUSLICE_NONINTERACTIVE in the README)."
+}
+
+ask() {  # ask VAR_NAME "prompt text"
+    local __var="$1" __prompt="$2" __reply=""
+    if [ "$NEUSLICE_NONINTERACTIVE" = "1" ] || [ "$HAVE_TTY" != "1" ]; then
+        _no_tty_fail "$__var"
+    fi
+    printf '%s' "$__prompt" > /dev/tty
+    IFS= read -r __reply < /dev/tty
+    printf -v "$__var" '%s' "$__reply"
+}
+
+ask_secret() {  # ask_secret VAR_NAME "prompt text" — never echoed, never logged
+    local __var="$1" __prompt="$2" __reply=""
+    if [ "$NEUSLICE_NONINTERACTIVE" = "1" ] || [ "$HAVE_TTY" != "1" ]; then
+        _no_tty_fail "$__var"
+    fi
+    printf '%s' "$__prompt" > /dev/tty
+    IFS= read -rs __reply < /dev/tty
+    printf '\n' > /dev/tty
+    printf -v "$__var" '%s' "$__reply"
+}
+
 ask_yn() {
-    local prompt="$1" default="${2:-y}"
-    local hint; [[ "$default" == "y" ]] && hint="[Y/n]" || hint="[y/N]"
-    local ans
-    read -rp "  $prompt $hint: " ans
+    local prompt="$1" default="${2:-y}" hint ans
+    [[ "$default" == "y" ]] && hint="[Y/n]" || hint="[y/N]"
+    if [ "$NEUSLICE_NONINTERACTIVE" = "1" ] || [ "$HAVE_TTY" != "1" ]; then
+        ans="$default"
+    else
+        printf '  %s %s: ' "$prompt" "$hint" > /dev/tty
+        IFS= read -r ans < /dev/tty
+    fi
     ans="${ans:-$default}"
     [[ "$ans" =~ ^[Yy] ]]
 }
@@ -57,22 +131,53 @@ echo -e "  ${BOLD}${CYAN}NeuSlice Node Setup${RESET}"
 echo -e "  ${GRAY}──────────────────────────────────────────${RESET}"
 echo ""
 
+# ── 0. Preflight ──────────────────────────────────────────────────────────────
+# Fail on a missing prerequisite with a clear message, up front, instead of
+# dying obscurely 300 lines later.
+
+header "Checking prerequisites..."
+
+OS_NAME="$(uname -s)"
+case "$OS_NAME" in
+    Darwin) PLATFORM="macOS" ;;
+    Linux)
+        PLATFORM="Linux"
+        grep -qi microsoft /proc/version 2>/dev/null && PLATFORM="WSL"
+        ;;
+    *) fail "Unsupported OS: $OS_NAME. This installer supports macOS and Linux — on Windows use install.ps1." ;;
+esac
+ok "Platform: $PLATFORM"
+
+# od and tr generate the Watchtower token; python3 parses every API response.
+MISSING_TOOLS=()
+for _t in curl python3 od tr; do
+    command -v "$_t" &>/dev/null || MISSING_TOOLS+=("$_t")
+done
+if [ ${#MISSING_TOOLS[@]} -gt 0 ]; then
+    fail "Missing required tool(s): ${MISSING_TOOLS[*]} — install them and re-run."
+fi
+ok "Required tools present"
+
 # ── 1. Check Docker ───────────────────────────────────────────────────────────
 
 header "Checking Docker..."
 
-if ! command -v docker &>/dev/null; then
-    warn "Docker not found. Installing..."
-    curl -fsSL https://get.docker.com | sh
-    ok "Docker installed"
+if [ "$NEUSLICE_DRY_RUN" = "1" ]; then
+    warn "DRY RUN — skipping all Docker checks and commands"
 else
-    ok "Docker found: $(docker --version)"
-fi
+    if ! command -v docker &>/dev/null; then
+        warn "Docker not found. Installing..."
+        curl -fsSL https://get.docker.com | sh
+        ok "Docker installed"
+    else
+        ok "Docker found: $(docker --version)"
+    fi
 
-docker info &>/dev/null || fail "Docker is installed but not running. Start Docker and re-run."
-docker compose version &>/dev/null || \
-    fail "Docker Compose v2 required. Run: apt install docker-compose-plugin  or update Docker Desktop."
-ok "Docker Compose v2 available"
+    docker info &>/dev/null || fail "Docker is installed but not running. Start Docker and re-run."
+    docker compose version &>/dev/null || \
+        fail "Docker Compose v2 required. Run: apt install docker-compose-plugin  or update Docker Desktop."
+    ok "Docker Compose v2 available"
+fi
 
 # ── 2. Install directory ──────────────────────────────────────────────────────
 
@@ -84,7 +189,12 @@ ok "Install directory: $INSTALL_DIR"
 # ── 3. Download docker-compose.yml ────────────────────────────────────────────
 
 header "Downloading docker-compose.yml..."
-curl -fsSL "${COMPOSE_URL}?t=$(date +%s)" -o docker-compose.yml
+# Cache-bust http(s) only — raw.githubusercontent caches for ~5 min. A file://
+# URL (used by the CI dry-run) must not get a query string appended.
+case "$COMPOSE_URL" in
+    http*) curl -fsSL "${COMPOSE_URL}?t=$(date +%s)" -o docker-compose.yml ;;
+    *)     curl -fsSL "${COMPOSE_URL}" -o docker-compose.yml ;;
+esac
 ok "docker-compose.yml downloaded"
 
 # ── 4. Configuration ──────────────────────────────────────────────────────────
@@ -118,15 +228,14 @@ if [ -f .env ] && grep -q "^NEUSLICE_TOKEN=" .env; then
         info "Your .env is missing Bambuddy login credentials (needed for file upload)."
         dim  "(These are the username and password for the Bambuddy web UI.)"
         echo ""
-        UP_USER=""
+        UP_USER="${BAMBU_USERNAME:-}"
         while [ -z "$UP_USER" ]; do
-            read -rp "  Bambuddy Username: " UP_USER
+            ask UP_USER "  Bambuddy Username: "
             [ -z "$UP_USER" ] && warn "Username cannot be empty."
         done
-        UP_PASS=""
+        UP_PASS="${BAMBU_PASSWORD:-}"
         while [ -z "$UP_PASS" ]; do
-            read -rsp "  Bambuddy Password: " UP_PASS
-            echo ""
+            ask_secret UP_PASS "  Bambuddy Password: "
             [ -z "$UP_PASS" ] && warn "Password cannot be empty."
         done
         printf "\nBAMBU_USERNAME=%s\n" "$UP_USER" >> .env
@@ -242,10 +351,13 @@ PYEOF
 
     COMPOSE_PROFILE=""
     BAMBUDDY_URL=""
-    BAMBU_API_KEY=""
-    BAMBU_USERNAME=""
-    BAMBU_PASSWORD=""
-    BAMBU_PRINTER_ID=""
+    # Seeded from the environment when present, so a scripted or CI run supplies
+    # these instead of being prompted. The prompt loops below are `while [ -z … ]`,
+    # so an env-provided value simply skips the prompt.
+    BAMBU_API_KEY="${BAMBU_API_KEY:-}"
+    BAMBU_USERNAME="${BAMBU_USERNAME:-}"
+    BAMBU_PASSWORD="${BAMBU_PASSWORD:-}"
+    BAMBU_PRINTER_ID="${BAMBU_PRINTER_ID:-}"
 
     if [ "$HAS_BAMBUDDY_RAW" = "False" ] || [ "$HAS_BAMBUDDY_RAW" = "false" ]; then
 
@@ -286,19 +398,29 @@ PYEOF
         #   Linux Docker Engine            → default-route gateway (fallback host.docker.internal)
         # A real LAN IP or remote hostname reaches both, so it is left unchanged.
         DEFAULT_BAMBUDDY_URL="http://localhost:${BAMBUDDY_PORT}"
-        dim "(Enter the URL as you reach Bambuddy on THIS machine — usually localhost."
-        dim " We translate it to a container-reachable address for the agent automatically.)"
-        read -rp "  Bambuddy URL (press Enter for $DEFAULT_BAMBUDDY_URL): " CUSTOM_URL
+        if [ -n "${NEUSLICE_BAMBUDDY_URL:-}" ]; then
+            CUSTOM_URL="$NEUSLICE_BAMBUDDY_URL"      # scripted / CI
+        elif [ "$NEUSLICE_NONINTERACTIVE" = "1" ]; then
+            CUSTOM_URL=""                            # take the localhost default
+        else
+            dim "(Enter the URL as you reach Bambuddy on THIS machine — usually localhost."
+            dim " We translate it to a container-reachable address for the agent automatically.)"
+            ask CUSTOM_URL "  Bambuddy URL (press Enter for $DEFAULT_BAMBUDDY_URL): "
+        fi
         BAMBUDDY_VALIDATE_URL="${CUSTOM_URL:-$DEFAULT_BAMBUDDY_URL}"
         BAMBUDDY_VALIDATE_URL="${BAMBUDDY_VALIDATE_URL%/}"   # strip trailing slash
 
         # Container-reachable address written to .env (see note above).
-        if [[ "$(uname)" == "Darwin" ]]; then
-            HOST_ADDR="host.docker.internal"
-        else
-            HOST_ADDR=$(ip route show default 2>/dev/null | awk '/default/ {print $3}' | head -1)
-            HOST_ADDR="${HOST_ADDR:-host.docker.internal}"
-        fi
+        # One address on every platform: docker-compose.yml maps
+        # host.docker.internal to `host-gateway`, which Docker resolves to the
+        # host on Linux Engine as well as Docker Desktop.
+        #
+        # This replaced a per-platform guess that used `ip route show default` on
+        # Linux — that returns the LAN ROUTER, not the docker bridge gateway, so
+        # Linux nodes were pointed at the wrong host; and the pipeline exited 127
+        # on a box without iproute2, which under set -e + pipefail killed the
+        # whole installer with 2>/dev/null hiding the reason.
+        HOST_ADDR="host.docker.internal"
         BAMBUDDY_URL=$(printf '%s' "$BAMBUDDY_VALIDATE_URL" \
             | sed -E "s#://(localhost|127\.0\.0\.1)([:/]|\$)#://${HOST_ADDR}\2#")
         [ "$BAMBUDDY_URL" != "$BAMBUDDY_VALIDATE_URL" ] && \
@@ -309,9 +431,8 @@ PYEOF
         dim "Create an API key in Bambuddy: Settings → API Keys → Create API Key"
         dim "Required permissions: Read Status, Manage Queue, Control Printer, Manage Library"
         echo ""
-        BAMBU_API_KEY=""
         while [ -z "$BAMBU_API_KEY" ]; do
-            read -rp "  Bambuddy API Key: " BAMBU_API_KEY
+            ask BAMBU_API_KEY "  Bambuddy API Key: "
             [ -z "$BAMBU_API_KEY" ] && warn "API key cannot be empty."
         done
 
@@ -320,15 +441,12 @@ PYEOF
         info "Bambuddy requires a username and password to upload print files."
         dim  "(These are the credentials you use to log into the Bambuddy web UI.)"
         echo ""
-        BAMBU_USERNAME=""
         while [ -z "$BAMBU_USERNAME" ]; do
-            read -rp "  Bambuddy Username: " BAMBU_USERNAME
+            ask BAMBU_USERNAME "  Bambuddy Username: "
             [ -z "$BAMBU_USERNAME" ] && warn "Username cannot be empty."
         done
-        BAMBU_PASSWORD=""
         while [ -z "$BAMBU_PASSWORD" ]; do
-            read -rsp "  Bambuddy Password: " BAMBU_PASSWORD
-            echo ""
+            ask_secret BAMBU_PASSWORD "  Bambuddy Password: "
             [ -z "$BAMBU_PASSWORD" ] && warn "Password cannot be empty."
         done
 
@@ -367,7 +485,7 @@ PYEOF
 
             SELECTION=""
             while true; do
-                read -rp "  Enter number (1–${PRINTER_COUNT}): " SELECTION
+                ask SELECTION "  Enter number (1–${PRINTER_COUNT}): "
                 if [[ "$SELECTION" =~ ^[0-9]+$ ]] && \
                    [ "$SELECTION" -ge 1 ] && [ "$SELECTION" -le "$PRINTER_COUNT" ]; then
                     IDX=$((SELECTION - 1))
@@ -434,22 +552,28 @@ fi
 
 # ── 5. Pull and start ─────────────────────────────────────────────────────────
 
-echo ""
-header "Pulling Docker images (this may take a minute on first run)..."
-docker compose pull || {
-    warn "Image pull failed — continuing with locally cached images (if any)..."
-}
-
-echo ""
-header "Starting NeuSlice node..."
-docker compose up -d || {
+if [ "$NEUSLICE_DRY_RUN" = "1" ]; then
     echo ""
-    fail "'docker compose up -d' failed. Recent logs:\n$(docker compose logs --tail=30 2>&1)"
-}
+    warn "DRY RUN — skipping 'docker compose pull' and 'docker compose up -d'"
+    ok "Config written; stopping before Docker as requested"
+else
+    echo ""
+    header "Pulling Docker images (this may take a minute on first run)..."
+    docker compose pull || {
+        warn "Image pull failed — continuing with locally cached images (if any)..."
+    }
+
+    echo ""
+    header "Starting NeuSlice node..."
+    docker compose up -d || {
+        echo ""
+        fail "'docker compose up -d' failed. Recent logs:\n$(docker compose logs --tail=30 2>&1)"
+    }
+fi
 
 # ── 6. Path A: wait for Bambuddy, then pick printer ──────────────────────────
 
-if grep -q "^COMPOSE_PROFILES=bambuddy" .env 2>/dev/null; then
+if [ "$NEUSLICE_DRY_RUN" != "1" ] && grep -q "^COMPOSE_PROFILES=bambuddy" .env 2>/dev/null; then
     echo ""
     header "Waiting for Bambuddy to start..."
     BAMBUDDY_HOST_URL="http://localhost:${BAMBUDDY_PORT}"
@@ -497,7 +621,7 @@ if grep -q "^COMPOSE_PROFILES=bambuddy" .env 2>/dev/null; then
 
         SELECTION=""
         while true; do
-            read -rp "  Enter number (1–${PRINTER_COUNT}): " SELECTION
+            ask SELECTION "  Enter number (1–${PRINTER_COUNT}): "
             if [[ "$SELECTION" =~ ^[0-9]+$ ]] && \
                [ "$SELECTION" -ge 1 ] && [ "$SELECTION" -le "$PRINTER_COUNT" ]; then
                 IDX=$((SELECTION - 1))
