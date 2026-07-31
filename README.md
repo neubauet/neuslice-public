@@ -24,6 +24,20 @@ Open PowerShell and run:
 irm https://raw.githubusercontent.com/neubauet/neuslice-public/main/install.ps1 | iex
 ```
 
+#### Windows without Docker (native service)
+
+Prefer not to run Docker Desktop? On Windows the node can run as a native Windows
+service instead. It provisions its own Node.js runtime and registers a `neuslice-agent`
+service — no Docker required. Run PowerShell **as administrator** and paste the setup
+code from **Dashboard → Your Printers → Add Printer**:
+
+```powershell
+$env:NEUSLICE_SETUP_CODE="YOUR-CODE"; irm https://raw.githubusercontent.com/neubauet/neuslice-public/main/install-native.ps1 | iex
+```
+
+Managing and troubleshooting the native service is covered in
+[docs/windows-native-agent.md](docs/windows-native-agent.md).
+
 ### Mac / Linux
 
 ```bash
@@ -121,5 +135,7 @@ All commands should be run from your NeuSlice install directory (`~/.neuslice` b
 |---|---|
 | `docker-compose.yml` | The full container stack (agent + Bambuddy + Watchtower) |
 | `install.sh` | One-line installer for Mac / Linux |
-| `install.ps1` | One-line installer for Windows |
+| `install.ps1` | One-line installer for Windows (Docker) |
+| `install-native.ps1` | One-line installer for Windows without Docker (native service) |
+| `neuslice-agent-native.zip` | Agent code the native Windows installer downloads |
 | `docs/` | Additional documentation |
