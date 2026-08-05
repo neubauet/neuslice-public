@@ -34,7 +34,18 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # -- Pinned provisioning sources (bump + re-test when updating) -----------------
-$NODE_VERSION          = 'v20.18.0'                                          # Node LTS (agent needs >=18: fetch, AbortSignal.timeout)
+# Node 24 is Active LTS (until Apr 2028). The previous pin, v20.18.0, was an
+# Oct-2024 patch on a line that reached EOL on 2026-04-30, so it was missing
+# both the post-EOL gap and most of the 20.x security series released while 20
+# was still supported. This is a runtime the customer does not choose and cannot
+# update independently, so it wants the longest-supported line, not the oldest
+# one that happens to work. The agent's own floor is >=18 (fetch,
+# AbortSignal.timeout); nothing here required 20.
+#
+# Keep this file ASCII-only. It is fetched and executed on customer machines,
+# and a BOM-less .ps1 containing non-ASCII is at the mercy of the reading
+# host's codepage assumptions.
+$NODE_VERSION          = 'v24.19.0'                                          # Node Active LTS - re-test the install path when bumping
 $NODE_URL              = "https://nodejs.org/dist/$NODE_VERSION/node-$NODE_VERSION-win-x64.zip"
 $WINSW_URL             = 'https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe'
 $MIRROR_AGENT_ZIP      = 'https://raw.githubusercontent.com/neubauet/neuslice-public/main/neuslice-agent-native.zip'
