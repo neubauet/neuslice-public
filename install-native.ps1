@@ -84,6 +84,20 @@ trap {
     try { Stop-Transcript | Out-Null } catch { }
     exit 1
 }
+# Read one property off a response object, trying each name in order. Returns ''
+# when absent. Set-StrictMode -Version Latest turns a plain $obj.missing into a
+# terminating error, so every optional field of the exchange response goes
+# through here.
+function Get-Prop {
+    param([object]$Obj, [string[]]$Names)
+    if ($null -eq $Obj) { return '' }
+    foreach ($n in $Names) {
+        $p = $Obj.PSObject.Properties[$n]
+        if ($p -and $p.Value -and ([string]$p.Value).Trim() -ne '') { return ([string]$p.Value).Trim() }
+    }
+    return ''
+}
+
 function Ask-YesNo {
     param([string]$Prompt, [bool]$Default = $true)
     $hint = if ($Default) { '[Y/n]' } else { '[y/N]' }
@@ -256,11 +270,76 @@ if (-not $skipEnv) {
     $displayName  = $exchangeResponse.display_name
     $printerModel = $exchangeResponse.printer_model
     $hasBambuddy  = [bool]$exchangeResponse.has_bambuddy
+    # Which printer the node actually drives. Absent on a code minted by an older
+    # backend, where bambu was the only option - so default to it.
+    $adapter      = Get-Prop $exchangeResponse @('adapter')
+    if ($adapter -eq '')          { $adapter = 'bambu' }
+    if ($adapter -eq 'moonraker') { $adapter = 'klipper' }
+    $adapterEnv   = if ($exchangeResponse.PSObject.Properties['adapter_env']) { $exchangeResponse.adapter_env } else { $null }
     Write-Success "Configuration received for: $displayName ($printerModel)"
 
-    # -- Bambuddy - native: localhost works (no host.docker.internal) -----------
+    # -- Printer connection -----------------------------------------------------
+    # One branch per adapter. Only the Bambu branch involves Bambuddy at all.
+    # Native runtime: no container, so every host address is used verbatim -
+    # localhost and .local both work here, unlike the Docker path.
     $bambuddyUrl = ''; $bambuApiKey = ''; $bambuUsername = ''; $bambuPassword = ''; $bambuPrinterId = ''; $isPathA = $false
-    if (-not $hasBambuddy) {
+    $klipperHost = ''; $klipperApiKey = ''; $octoprintHost = ''; $octoprintApiKey = ''
+    if ($adapter -ne 'bambu') {
+
+        # -- Klipper / OctoPrint -----------------------------------------------
+        # Bambuddy is a Bambu Lab bridge. These printers do not go near it: no
+        # Bambuddy service to install, no wait loop, and no BAMBUDDY_BASE_URL in
+        # the .env (which alone would make the agent pick the bambu adapter -
+        # see detect_adapter_name in the agent's adapters/index.js).
+        #
+        # The connection details were entered in the dashboard at registration
+        # and ride the setup code, so there is nothing to ask for here.
+        if ($adapter -eq 'klipper') {
+            $adapterLabel  = 'Klipper (via Moonraker)'
+            $klipperHost   = Get-Prop $adapterEnv @('KLIPPER_HOST',    'MOONRAKER_HOST')
+            $klipperApiKey = Get-Prop $adapterEnv @('KLIPPER_API_KEY', 'MOONRAKER_API_KEY')
+            # Prompt only as a fallback - covers a code minted before the backend
+            # carried adapter_env, so an old code still installs instead of
+            # producing a node with nothing to connect to.
+            while ($klipperHost -eq '') {
+                Write-Dim "(e.g. http://192.168.1.100:7125 - the address of Moonraker on your LAN.)"
+                $klipperHost = Read-Host "  Moonraker URL"
+            }
+            $adapterHost = $klipperHost; $probePath = '/server/info'; $probeKey = $klipperApiKey
+        } else {
+            $adapterLabel    = 'OctoPrint'
+            $octoprintHost   = Get-Prop $adapterEnv @('OCTOPRINT_HOST')
+            $octoprintApiKey = Get-Prop $adapterEnv @('OCTOPRINT_API_KEY')
+            while ($octoprintHost -eq '') {
+                Write-Dim "(e.g. http://192.168.1.100 - the address of OctoPrint on your LAN.)"
+                $octoprintHost = Read-Host "  OctoPrint URL"
+            }
+            $adapterHost = $octoprintHost; $probePath = '/api/version'; $probeKey = $octoprintApiKey
+        }
+        $adapterHost = $adapterHost.TrimEnd('/')
+        if ($adapter -eq 'klipper') { $klipperHost = $adapterHost } else { $octoprintHost = $adapterHost }
+        Write-Success "$adapterLabel - no Bambuddy needed for this printer"
+        Write-Dim "Connecting to $adapterHost"
+
+        # Reachability probe. A typo here produces a node that registers, comes
+        # up, and never prints - the failure surfaces days later as "my printer
+        # never goes online". Better to say it now.
+        $probeHeaders = if ($probeKey -ne '') { @{ 'X-Api-Key' = $probeKey } } else { @{} }
+        $reachable = $true
+        try { $null = Invoke-RestMethod -Uri "${adapterHost}${probePath}" -Headers $probeHeaders -Method Get -TimeoutSec 5 -ErrorAction Stop }
+        catch { $reachable = $false }
+        if ($reachable) {
+            Write-Success "$adapterLabel reachable"
+        } else {
+            Write-Host ""
+            Write-Warn "Could not reach $adapterLabel at ${adapterHost}${probePath}."
+            Write-Dim "Common causes: the printer is powered off, the URL is wrong, or an API key is required."
+            if (-not (Ask-YesNo "Continue anyway? (the service keeps retrying once it starts)")) {
+                Write-Fail "Stopped at your request. Fix the URL in the dashboard and register again."
+            }
+        }
+
+    } elseif (-not $hasBambuddy) {
         $isPathA = $true
         $bambuddyUrl = "http://127.0.0.1:${BAMBUDDY_PORT}"
         Write-Success "Bambuddy: native (Path A)"
@@ -310,7 +389,10 @@ if (-not $skipEnv) {
         $tz = if ($tzMap.ContainsKey($winTz)) { $tzMap[$winTz] } else { 'UTC' }
     } catch { }
 
-    # -- Write .env (native: AGENT_RUNTIME=native, localhost Bambuddy, no Docker/Watchtower) --
+    # -- Write .env (native: AGENT_RUNTIME=native, no Docker/Watchtower) --------
+    # Everything above the adapter section is common to every printer type.
+    # PRINTER_ADAPTER is written explicitly rather than left to the agent's
+    # auto-detection, so what the owner chose in the dashboard is what runs.
     $envLines = @(
         "# NeuSlice Node Configuration (native)",
         "# Generated by install-native.ps1 on $(Get-Date -Format 'yyyy-MM-dd HH:mm')",
@@ -323,15 +405,31 @@ if (-not $skipEnv) {
         "# Native Windows service runtime (WinSW + Velopack self-update)",
         "AGENT_RUNTIME=native",
         "",
-        "# Bambuddy connection (agent reads BAMBUDDY_BASE_URL or BAMBU_HOST)",
-        "BAMBUDDY_BASE_URL=$bambuddyUrl",
+        "# Printer adapter",
+        "PRINTER_ADAPTER=$adapter",
         "",
         "TZ=$tz"
     )
-    if ($bambuApiKey -ne '') {
-        $envLines += @("", "# Bambuddy API credentials (existing install)", "BAMBU_API_KEY=$bambuApiKey", "BAMBU_USERNAME=$bambuUsername", "BAMBU_PASSWORD=$bambuPassword")
+    # -- Adapter section - only one of these ever lands in a given .env --------
+    switch ($adapter) {
+        'bambu' {
+            $envLines += @("", "# Bambuddy connection (agent reads BAMBUDDY_BASE_URL or BAMBU_HOST)", "BAMBUDDY_BASE_URL=$bambuddyUrl")
+            if ($bambuApiKey -ne '') {
+                $envLines += @("", "# Bambuddy API credentials (existing install)", "BAMBU_API_KEY=$bambuApiKey", "BAMBU_USERNAME=$bambuUsername", "BAMBU_PASSWORD=$bambuPassword")
+            }
+            if ($bambuPrinterId -ne '') { $envLines += "BAMBU_PRINTER_ID=$bambuPrinterId" }
+        }
+        'klipper' {
+            $envLines += @("", "# Klipper via Moonraker", "KLIPPER_HOST=$klipperHost")
+            # Blank on most setups - only needed when moonraker.conf restricts
+            # trusted_clients. Omit the line entirely rather than write "".
+            if ($klipperApiKey -ne '') { $envLines += "KLIPPER_API_KEY=$klipperApiKey" }
+        }
+        'octoprint' {
+            $envLines += @("", "# OctoPrint", "OCTOPRINT_HOST=$octoprintHost")
+            if ($octoprintApiKey -ne '') { $envLines += "OCTOPRINT_API_KEY=$octoprintApiKey" }
+        }
     }
-    if ($bambuPrinterId -ne '') { $envLines += "BAMBU_PRINTER_ID=$bambuPrinterId" }
     $envLines -join "`n" | Set-Content -Path $envFile -Encoding UTF8
     Write-Success ".env written"
 }
@@ -373,11 +471,16 @@ if ($LASTEXITCODE -ne 0) { Write-Fail "Service install failed (WinSW exit $LASTE
 Write-Success "Service '$SERVICE_ID' installed and started"
 
 # -- 6. Path A: wait for native Bambuddy, then pick printer + restart -----------
+# Bambu only. Re-derived from the .env rather than the variable above so it is
+# also correct on the "keep existing configuration" path, where none of the
+# branch above ran. A Klipper or OctoPrint .env has no BAMBUDDY_BASE_URL line
+# at all, so this stays false and the wait loop is skipped entirely.
 $isPathA = $false
 if (Test-Path $envFile) {
-    $bl = Get-Content $envFile | Where-Object { $_ -match '^BAMBUDDY_BASE_URL=' }
+    $isBambu    = -not (Select-String -Path $envFile -Pattern '^PRINTER_ADAPTER=(klipper|moonraker|octoprint)' -Quiet)
+    $bl         = Get-Content $envFile | Where-Object { $_ -match '^BAMBUDDY_BASE_URL=' }
     $hasPrinter = Select-String -Path $envFile -Pattern '^BAMBU_PRINTER_ID=' -Quiet
-    if ($bl -match '127\.0\.0\.1|localhost' -and -not $hasPrinter) { $isPathA = $true }
+    if ($isBambu -and $bl -match '127\.0\.0\.1|localhost' -and -not $hasPrinter) { $isPathA = $true }
 }
 if ($isPathA) {
     Write-Header "Waiting for Bambuddy at http://localhost:${BAMBUDDY_PORT}..."

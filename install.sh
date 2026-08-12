@@ -126,6 +126,21 @@ json_array_field() {
     echo "$json" | python3 -c "import sys,json; a=json.load(sys.stdin); print(a[$idx].get('$key',''))" 2>/dev/null || echo ""
 }
 
+# One level down, for the exchange response's adapter_env object.
+json_sub_field() {
+    local json="$1" outer="$2" key="$3"
+    echo "$json" | python3 -c "import sys,json; d=json.load(sys.stdin).get('$outer') or {}; print(d.get('$key','') or '')" 2>/dev/null || echo ""
+}
+
+# A container on the bridge network cannot reach the host as 'localhost' — that
+# is the container itself. Rewrite only a loopback host; a LAN IP or remote
+# hostname already reaches both the host shell and the container, so it is left
+# alone. docker-compose.yml maps host.docker.internal to host-gateway, which
+# resolves on Docker Engine (Linux) as well as Docker Desktop.
+to_container_url() {
+    printf '%s' "$1" | sed -E "s#://(localhost|127\.0\.0\.1)([:/]|\$)#://host.docker.internal\2#"
+}
+
 echo ""
 echo -e "  ${BOLD}${CYAN}NeuSlice Node Setup${RESET}"
 echo -e "  ${GRAY}──────────────────────────────────────────${RESET}"
@@ -411,16 +426,26 @@ PYEOF
     DISPLAY_NAME=$(json_field "$EXCHANGE_RESPONSE" "display_name")
     PRINTER_MODEL=$(json_field "$EXCHANGE_RESPONSE" "printer_model")
     HAS_BAMBUDDY_RAW=$(json_field "$EXCHANGE_RESPONSE" "has_bambuddy")
+    # Which printer the node actually drives. Absent on a code minted by an older
+    # backend, where bambu was the only option — so default to it.
+    ADAPTER=$(json_field "$EXCHANGE_RESPONSE" "adapter")
+    ADAPTER="${ADAPTER:-bambu}"
+    [ "$ADAPTER" = "moonraker" ] && ADAPTER="klipper"
 
     [ -z "$AGENT_TOKEN" ] || [ -z "$NODE_ID" ] && \
         fail "Exchange failed — code may be expired or already used. Register again from the dashboard."
 
     ok "Configuration received for: $DISPLAY_NAME ($PRINTER_MODEL)"
 
-    # ── Bambuddy — Path A vs Path B ───────────────────────────────────────────
+    # ── Printer connection ────────────────────────────────────────────────────
+    # One branch per adapter. Only the Bambu branch involves Bambuddy at all.
 
     COMPOSE_PROFILE=""
     BAMBUDDY_URL=""
+    KLIPPER_HOST=""
+    KLIPPER_API_KEY=""
+    OCTOPRINT_HOST=""
+    OCTOPRINT_API_KEY=""
     # Seeded from the environment when present, so a scripted or CI run supplies
     # these instead of being prompted. The prompt loops below are `while [ -z … ]`,
     # so an env-provided value simply skips the prompt.
@@ -429,7 +454,91 @@ PYEOF
     BAMBU_PASSWORD="${BAMBU_PASSWORD:-}"
     BAMBU_PRINTER_ID="${BAMBU_PRINTER_ID:-}"
 
-    if [ "$HAS_BAMBUDDY_RAW" = "False" ] || [ "$HAS_BAMBUDDY_RAW" = "false" ]; then
+    if [ "$ADAPTER" != "bambu" ]; then
+
+        # ── Klipper / OctoPrint ───────────────────────────────────────────────
+        # Bambuddy is a Bambu Lab bridge. These printers do not go near it: no
+        # container, no compose profile, no BAMBUDDY_BASE_URL in .env (which
+        # alone would make the agent pick the bambu adapter — see
+        # detect_adapter_name in the agent's adapters/index.js).
+        #
+        # The connection details were entered in the dashboard at registration
+        # and ride the setup code, so there is nothing to ask for here.
+
+        if [ "$ADAPTER" = "klipper" ]; then
+            ADAPTER_LABEL="Klipper (via Moonraker)"
+            KLIPPER_HOST=$(json_sub_field "$EXCHANGE_RESPONSE" "adapter_env" "KLIPPER_HOST")
+            [ -z "$KLIPPER_HOST" ] && KLIPPER_HOST=$(json_sub_field "$EXCHANGE_RESPONSE" "adapter_env" "MOONRAKER_HOST")
+            KLIPPER_API_KEY=$(json_sub_field "$EXCHANGE_RESPONSE" "adapter_env" "KLIPPER_API_KEY")
+            [ -z "$KLIPPER_API_KEY" ] && KLIPPER_API_KEY=$(json_sub_field "$EXCHANGE_RESPONSE" "adapter_env" "MOONRAKER_API_KEY")
+            # Env override, then prompt — covers a code minted before the backend
+            # carried adapter_env, so an old code still installs instead of
+            # producing a node with nothing to connect to.
+            KLIPPER_HOST="${NEUSLICE_KLIPPER_HOST:-$KLIPPER_HOST}"
+            KLIPPER_API_KEY="${NEUSLICE_KLIPPER_API_KEY:-$KLIPPER_API_KEY}"
+            while [ -z "$KLIPPER_HOST" ]; do
+                dim "(e.g. http://192.168.1.100:7125 — the address of Moonraker on your LAN.)"
+                ask KLIPPER_HOST "  Moonraker URL: "
+            done
+            ADAPTER_HOST="$KLIPPER_HOST"
+            PROBE_PATH="/server/info"
+            PROBE_KEY="$KLIPPER_API_KEY"
+        else
+            ADAPTER_LABEL="OctoPrint"
+            OCTOPRINT_HOST=$(json_sub_field "$EXCHANGE_RESPONSE" "adapter_env" "OCTOPRINT_HOST")
+            OCTOPRINT_API_KEY=$(json_sub_field "$EXCHANGE_RESPONSE" "adapter_env" "OCTOPRINT_API_KEY")
+            OCTOPRINT_HOST="${NEUSLICE_OCTOPRINT_HOST:-$OCTOPRINT_HOST}"
+            OCTOPRINT_API_KEY="${NEUSLICE_OCTOPRINT_API_KEY:-$OCTOPRINT_API_KEY}"
+            while [ -z "$OCTOPRINT_HOST" ]; do
+                dim "(e.g. http://192.168.1.100 — the address of OctoPrint on your LAN.)"
+                ask OCTOPRINT_HOST "  OctoPrint URL: "
+            done
+            ADAPTER_HOST="$OCTOPRINT_HOST"
+            PROBE_PATH="/api/version"
+            PROBE_KEY="$OCTOPRINT_API_KEY"
+        fi
+        ADAPTER_HOST="${ADAPTER_HOST%/}"          # strip trailing slash
+        ok "$ADAPTER_LABEL — no Bambuddy needed for this printer"
+        dim "Connecting to $ADAPTER_HOST"
+
+        # Reachability probe. A typo here produces a node that registers, comes
+        # up, and never prints — the failure surfaces days later as "my printer
+        # never goes online". Better to say it now.
+        # Two calls rather than one with ${KEY:+-H "…"}: an unquoted expansion
+        # word-splits the header into three arguments, and macOS bash 3.2 has no
+        # safe empty-array expansion under `set -u`.
+        probe_adapter() {
+            if [ -n "$PROBE_KEY" ]; then
+                curl -fsSL --max-time 5 -H "X-Api-Key: $PROBE_KEY" "${ADAPTER_HOST}${PROBE_PATH}" >/dev/null 2>&1
+            else
+                curl -fsSL --max-time 5 "${ADAPTER_HOST}${PROBE_PATH}" >/dev/null 2>&1
+            fi
+        }
+        if ! probe_adapter; then
+            echo ""
+            warn "Could not reach $ADAPTER_LABEL at ${ADAPTER_HOST}${PROBE_PATH}."
+            dim "Common causes: the printer is powered off, the URL is wrong, or an API key is required."
+            if ! ask_yn "Continue anyway? (the agent keeps retrying once it starts)" y; then
+                fail "Stopped at your request. Fix the URL in the dashboard and register again."
+            fi
+        else
+            ok "$ADAPTER_LABEL reachable"
+        fi
+
+        # The agent runs in a container: loopback there is the container itself,
+        # and .local mDNS names do not resolve inside one.
+        ADAPTER_HOST_CONTAINER=$(to_container_url "$ADAPTER_HOST")
+        if [ "$ADAPTER_HOST_CONTAINER" != "$ADAPTER_HOST" ]; then
+            dim "Agent container will reach it at $ADAPTER_HOST_CONTAINER"
+        fi
+        if [[ "$ADAPTER_HOST_CONTAINER" =~ \.local(:[0-9]+)?(/|$) ]]; then
+            warn "'.local' names are resolved by mDNS, which does not work inside a Docker container."
+            warn "If the printer never comes online, re-register with the LAN IP instead (e.g. http://192.168.1.100:7125)."
+        fi
+        if [ "$ADAPTER" = "klipper" ]; then KLIPPER_HOST="$ADAPTER_HOST_CONTAINER"
+        else                                OCTOPRINT_HOST="$ADAPTER_HOST_CONTAINER"; fi
+
+    elif [ "$HAS_BAMBUDDY_RAW" = "False" ] || [ "$HAS_BAMBUDDY_RAW" = "false" ]; then
 
         # ── PATH A: Fresh Bambuddy install ────────────────────────────────────
         # Install Bambuddy as part of our compose stack. No API key needed —
@@ -480,19 +589,15 @@ PYEOF
         BAMBUDDY_VALIDATE_URL="${CUSTOM_URL:-$DEFAULT_BAMBUDDY_URL}"
         BAMBUDDY_VALIDATE_URL="${BAMBUDDY_VALIDATE_URL%/}"   # strip trailing slash
 
-        # Container-reachable address written to .env (see note above).
-        # One address on every platform: docker-compose.yml maps
-        # host.docker.internal to `host-gateway`, which Docker resolves to the
-        # host on Linux Engine as well as Docker Desktop.
+        # Container-reachable address written to .env (see note above), via the
+        # shared to_container_url helper.
         #
         # This replaced a per-platform guess that used `ip route show default` on
         # Linux — that returns the LAN ROUTER, not the docker bridge gateway, so
         # Linux nodes were pointed at the wrong host; and the pipeline exited 127
         # on a box without iproute2, which under set -e + pipefail killed the
         # whole installer with 2>/dev/null hiding the reason.
-        HOST_ADDR="host.docker.internal"
-        BAMBUDDY_URL=$(printf '%s' "$BAMBUDDY_VALIDATE_URL" \
-            | sed -E "s#://(localhost|127\.0\.0\.1)([:/]|\$)#://${HOST_ADDR}\2#")
+        BAMBUDDY_URL=$(to_container_url "$BAMBUDDY_VALIDATE_URL")
         [ "$BAMBUDDY_URL" != "$BAMBUDDY_VALIDATE_URL" ] && \
             dim "Agent container will reach Bambuddy at $BAMBUDDY_URL"
 
@@ -576,6 +681,9 @@ PYEOF
         || echo "UTC")
 
     # ── Write .env ────────────────────────────────────────────────────────────
+    # Everything above the adapter section is common to every printer type.
+    # PRINTER_ADAPTER is written explicitly rather than left to the agent's
+    # auto-detection, so what the owner chose in the dashboard is what runs.
     WATCHTOWER_HTTP_API_TOKEN=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d '[:space:]')
     cat > .env << ENV
 # NeuSlice Node Configuration
@@ -589,32 +697,71 @@ NEUSLICE_API_URL=${BACKEND_URL}
 # Watchtower update token (shared secret between agent and watchtower)
 WATCHTOWER_HTTP_API_TOKEN=${WATCHTOWER_HTTP_API_TOKEN}
 
-# Bambuddy connection
-BAMBUDDY_BASE_URL=${BAMBUDDY_URL}
+# Printer adapter
+PRINTER_ADAPTER=${ADAPTER}
 
 # Timezone for log timestamps
 TZ=${TZ_VAL}
 ENV
 
-    # Path B extras — API key and printer ID
-    if [ -n "$BAMBU_API_KEY" ]; then
+    # ── Adapter section — only one of these ever lands in a given .env ────────
+    case "$ADAPTER" in
+    bambu)
         cat >> .env << ENV
+
+# Bambuddy connection
+BAMBUDDY_BASE_URL=${BAMBUDDY_URL}
+ENV
+        # Path B extras — API key, web-UI login (needed for file upload), printer ID
+        if [ -n "$BAMBU_API_KEY" ]; then
+            cat >> .env << ENV
 
 # Bambuddy API credentials (Path B — existing install)
 BAMBU_API_KEY=${BAMBU_API_KEY}
+BAMBU_USERNAME=${BAMBU_USERNAME}
+BAMBU_PASSWORD=${BAMBU_PASSWORD}
 ENV
-    fi
+        fi
 
-    if [ -n "$BAMBU_PRINTER_ID" ]; then
-        echo "BAMBU_PRINTER_ID=${BAMBU_PRINTER_ID}" >> .env
-    fi
+        if [ -n "$BAMBU_PRINTER_ID" ]; then
+            echo "BAMBU_PRINTER_ID=${BAMBU_PRINTER_ID}" >> .env
+        fi
 
-    # Compose profile for fresh Bambuddy
-    if [ -n "$COMPOSE_PROFILE" ]; then
-        echo "" >> .env
-        echo "# Enable Bambuddy container (managed by NeuSlice)" >> .env
-        echo "COMPOSE_PROFILES=${COMPOSE_PROFILE}" >> .env
-    fi
+        # Compose profile for fresh Bambuddy. Only set here: without it the
+        # bambuddy service in docker-compose.yml never starts, which is exactly
+        # what a Klipper or OctoPrint node wants.
+        if [ -n "$COMPOSE_PROFILE" ]; then
+            echo "" >> .env
+            echo "# Enable Bambuddy container (managed by NeuSlice)" >> .env
+            echo "COMPOSE_PROFILES=${COMPOSE_PROFILE}" >> .env
+        fi
+        ;;
+
+    klipper)
+        cat >> .env << ENV
+
+# Klipper via Moonraker
+KLIPPER_HOST=${KLIPPER_HOST}
+ENV
+        # Blank on most setups — only needed when moonraker.conf restricts
+        # trusted_clients. An empty value would still satisfy the agent's
+        # auto-detection, so omit the line entirely rather than write "".
+        if [ -n "$KLIPPER_API_KEY" ]; then
+            echo "KLIPPER_API_KEY=${KLIPPER_API_KEY}" >> .env
+        fi
+        ;;
+
+    octoprint)
+        cat >> .env << ENV
+
+# OctoPrint
+OCTOPRINT_HOST=${OCTOPRINT_HOST}
+ENV
+        if [ -n "$OCTOPRINT_API_KEY" ]; then
+            echo "OCTOPRINT_API_KEY=${OCTOPRINT_API_KEY}" >> .env
+        fi
+        ;;
+    esac
 
     chmod 600 .env
     ok ".env written"

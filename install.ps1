@@ -71,6 +71,29 @@ function Ask-YesNo {
     return $ans -match '^[Yy]'
 }
 
+# Read one value out of the exchange response's adapter_env object, trying each
+# name in order. Returns '' when absent — adapter_env is a PSCustomObject (or
+# $null on an older backend), so a missing property must not throw.
+function Get-AdapterEnv {
+    param([object]$Env, [string[]]$Names)
+    if ($null -eq $Env) { return '' }
+    foreach ($n in $Names) {
+        $v = $Env.PSObject.Properties[$n]
+        if ($v -and $v.Value -and ([string]$v.Value).Trim() -ne '') { return ([string]$v.Value).Trim() }
+    }
+    return ''
+}
+
+# A container on the bridge network cannot reach the host as 'localhost' — that
+# is the container itself. Rewrite only a loopback host; a LAN IP or remote
+# hostname already reaches both the host shell and the container, so it is left
+# alone. docker-compose.yml maps host.docker.internal to host-gateway, which
+# resolves on Docker Engine as well as Docker Desktop.
+function ConvertTo-ContainerUrl {
+    param([string]$Url)
+    return ($Url -replace '://(localhost|127\.0\.0\.1)(?=[:/]|$)', '://host.docker.internal')
+}
+
 Write-Host ""
 Write-Host "  NeuSlice Node Setup" -ForegroundColor Cyan -NoNewline
 Write-Host " (Windows)"
@@ -145,6 +168,14 @@ if ((Test-Path '.env') -and (Select-String -Path '.env' -Pattern '^NEUSLICE_TOKE
         $wt = -join ((1..64) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
         Add-Content -Path '.env' -Value "`nWATCHTOWER_HTTP_API_TOKEN=$wt"
         Write-Success "Added WATCHTOWER_TOKEN to existing .env"
+    }
+
+    # Ensure NEUSLICE_API_URL exists — the agent's spawn.js throws at import
+    # without it and the container crash-loops. Mirrors the same repair in
+    # install.sh; every .env this script wrote before today lacks it.
+    if (-not (Select-String -Path '.env' -Pattern '^NEUSLICE_API_URL=' -Quiet)) {
+        Add-Content -Path '.env' -Value "NEUSLICE_API_URL=$BACKEND_URL"
+        Write-Success "Added NEUSLICE_API_URL to existing .env"
     }
 
     # Ensure BAMBU_USERNAME/PASSWORD exist (older installs won't have them)
@@ -256,10 +287,16 @@ if (-not $skipEnv) {
     $displayName  = $exchangeResponse.display_name
     $printerModel = $exchangeResponse.printer_model
     $hasBambuddy  = [bool]$exchangeResponse.has_bambuddy
+    # Which printer the node actually drives. Absent on a code minted by an older
+    # backend, where bambu was the only option — so default to it.
+    $adapter      = if ($exchangeResponse.adapter) { [string]$exchangeResponse.adapter } else { 'bambu' }
+    if ($adapter -eq 'moonraker') { $adapter = 'klipper' }
+    $adapterEnv   = $exchangeResponse.adapter_env
 
     Write-Success "Configuration received for: $displayName ($printerModel)"
 
-    # ── Bambuddy — Path A vs Path B ───────────────────────────────────────────
+    # ── Printer connection ────────────────────────────────────────────────────
+    # One branch per adapter. Only the Bambu branch involves Bambuddy at all.
 
     $composeProfile  = ''
     $bambuddyUrl     = ''
@@ -267,8 +304,84 @@ if (-not $skipEnv) {
     $bambuUsername   = ''
     $bambuPassword   = ''
     $bambuPrinterId  = ''
+    $klipperHost     = ''
+    $klipperApiKey   = ''
+    $octoprintHost   = ''
+    $octoprintApiKey = ''
 
-    if (-not $hasBambuddy) {
+    if ($adapter -ne 'bambu') {
+
+        # ── Klipper / OctoPrint ───────────────────────────────────────────────
+        # Bambuddy is a Bambu Lab bridge. These printers do not go near it: no
+        # container, no compose profile, no BAMBUDDY_BASE_URL in .env (which
+        # alone would make the agent pick the bambu adapter — see
+        # detect_adapter_name in the agent's adapters/index.js).
+        #
+        # The connection details were entered in the dashboard at registration
+        # and ride the setup code, so there is nothing to ask for here.
+
+        if ($adapter -eq 'klipper') {
+            $adapterLabel  = 'Klipper (via Moonraker)'
+            $klipperHost   = Get-AdapterEnv $adapterEnv @('KLIPPER_HOST',    'MOONRAKER_HOST')
+            $klipperApiKey = Get-AdapterEnv $adapterEnv @('KLIPPER_API_KEY', 'MOONRAKER_API_KEY')
+            # Prompt only as a fallback — covers a code minted before the backend
+            # carried adapter_env, so an old code still installs instead of
+            # producing a node with nothing to connect to.
+            while ($klipperHost -eq '') {
+                Write-Dim "(e.g. http://192.168.1.100:7125 — the address of Moonraker on your LAN.)"
+                $klipperHost = Read-Host "  Moonraker URL"
+            }
+            $adapterHost = $klipperHost
+            $probePath   = '/server/info'
+            $probeKey    = $klipperApiKey
+        } else {
+            $adapterLabel    = 'OctoPrint'
+            $octoprintHost   = Get-AdapterEnv $adapterEnv @('OCTOPRINT_HOST')
+            $octoprintApiKey = Get-AdapterEnv $adapterEnv @('OCTOPRINT_API_KEY')
+            while ($octoprintHost -eq '') {
+                Write-Dim "(e.g. http://192.168.1.100 — the address of OctoPrint on your LAN.)"
+                $octoprintHost = Read-Host "  OctoPrint URL"
+            }
+            $adapterHost = $octoprintHost
+            $probePath   = '/api/version'
+            $probeKey    = $octoprintApiKey
+        }
+        $adapterHost = $adapterHost.TrimEnd('/')
+        Write-Success "$adapterLabel — no Bambuddy needed for this printer"
+        Write-Dim "Connecting to $adapterHost"
+
+        # Reachability probe. A typo here produces a node that registers, comes
+        # up, and never prints — the failure surfaces days later as "my printer
+        # never goes online". Better to say it now.
+        $probeHeaders = if ($probeKey -ne '') { @{ 'X-Api-Key' = $probeKey } } else { @{} }
+        $reachable = $true
+        try { $null = Invoke-RestMethod -Uri "${adapterHost}${probePath}" -Headers $probeHeaders -Method Get -TimeoutSec 5 -ErrorAction Stop }
+        catch { $reachable = $false }
+        if (-not $reachable) {
+            Write-Host ""
+            Write-Warn "Could not reach $adapterLabel at ${adapterHost}${probePath}."
+            Write-Dim "Common causes: the printer is powered off, the URL is wrong, or an API key is required."
+            if (-not (Ask-YesNo "Continue anyway? (the agent keeps retrying once it starts)")) {
+                Write-Fail "Stopped at your request. Fix the URL in the dashboard and register again."
+            }
+        } else {
+            Write-Success "$adapterLabel reachable"
+        }
+
+        # The agent runs in a container: loopback there is the container itself,
+        # and .local mDNS names do not resolve inside one.
+        $adapterHostContainer = ConvertTo-ContainerUrl $adapterHost
+        if ($adapterHostContainer -ne $adapterHost) {
+            Write-Dim "Agent container will reach it at $adapterHostContainer"
+        }
+        if ($adapterHostContainer -match '\.local(:\d+)?(/|$)') {
+            Write-Warn "'.local' names are resolved by mDNS, which does not work inside a Docker container."
+            Write-Warn "If the printer never comes online, re-register with the LAN IP instead (e.g. http://192.168.1.100:7125)."
+        }
+        if ($adapter -eq 'klipper') { $klipperHost = $adapterHostContainer }
+        else                        { $octoprintHost = $adapterHostContainer }
+
+    } elseif (-not $hasBambuddy) {
 
         # ── PATH A: Fresh Bambuddy install ────────────────────────────────────
         $composeProfile = 'bambuddy'
@@ -395,6 +508,9 @@ if (-not $skipEnv) {
     } catch { }
 
     # ── Write .env ────────────────────────────────────────────────────────────
+    # Everything above the adapter section is common to every printer type.
+    # PRINTER_ADAPTER is written explicitly rather than left to the agent's
+    # auto-detection, so what the owner chose in the dashboard is what runs.
     $watchtowerHttpApiToken = -join ((1..64) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
     $envLines = @(
         "# NeuSlice Node Configuration",
@@ -403,33 +519,58 @@ if (-not $skipEnv) {
         "# Agent credentials (auto-configured — do not share)",
         "NEUSLICE_TOKEN=$agentToken",
         "NEUSLICE_NODE_ID=$nodeId",
+        # Required, not optional: the agent's spawn.js throws at import without
+        # it and the container crash-loops. install.sh has written it since that
+        # bug; this script did not.
+        "NEUSLICE_API_URL=$BACKEND_URL",
         "",
         "# Watchtower update token (shared secret between agent and watchtower)",
         "WATCHTOWER_HTTP_API_TOKEN=$watchtowerHttpApiToken",
         "",
-        "# Bambuddy connection",
-        "BAMBUDDY_BASE_URL=$bambuddyUrl",
+        "# Printer adapter",
+        "PRINTER_ADAPTER=$adapter",
         "",
         "# Timezone for log timestamps",
         "TZ=$tz"
     )
 
-    if ($bambuApiKey -ne '') {
-        $envLines += ""
-        $envLines += "# Bambuddy API credentials (Path B — existing install)"
-        $envLines += "BAMBU_API_KEY=$bambuApiKey"
-        $envLines += "BAMBU_USERNAME=$bambuUsername"
-        $envLines += "BAMBU_PASSWORD=$bambuPassword"
-    }
+    # ── Adapter section — only one of these ever lands in a given .env ────────
+    switch ($adapter) {
+        'bambu' {
+            $envLines += @("", "# Bambuddy connection", "BAMBUDDY_BASE_URL=$bambuddyUrl")
 
-    if ($bambuPrinterId -ne '') {
-        $envLines += "BAMBU_PRINTER_ID=$bambuPrinterId"
-    }
+            # Path B extras — API key, web-UI login (needed for file upload), printer ID
+            if ($bambuApiKey -ne '') {
+                $envLines += ""
+                $envLines += "# Bambuddy API credentials (Path B — existing install)"
+                $envLines += "BAMBU_API_KEY=$bambuApiKey"
+                $envLines += "BAMBU_USERNAME=$bambuUsername"
+                $envLines += "BAMBU_PASSWORD=$bambuPassword"
+            }
 
-    if ($composeProfile -ne '') {
-        $envLines += ""
-        $envLines += "# Enable Bambuddy container (managed by NeuSlice)"
-        $envLines += "COMPOSE_PROFILES=$composeProfile"
+            if ($bambuPrinterId -ne '') {
+                $envLines += "BAMBU_PRINTER_ID=$bambuPrinterId"
+            }
+
+            # Compose profile for fresh Bambuddy. Only set here: without it the
+            # bambuddy service in docker-compose.yml never starts, which is
+            # exactly what a Klipper or OctoPrint node wants.
+            if ($composeProfile -ne '') {
+                $envLines += ""
+                $envLines += "# Enable Bambuddy container (managed by NeuSlice)"
+                $envLines += "COMPOSE_PROFILES=$composeProfile"
+            }
+        }
+        'klipper' {
+            $envLines += @("", "# Klipper via Moonraker", "KLIPPER_HOST=$klipperHost")
+            # Blank on most setups — only needed when moonraker.conf restricts
+            # trusted_clients. Omit the line entirely rather than write "".
+            if ($klipperApiKey -ne '') { $envLines += "KLIPPER_API_KEY=$klipperApiKey" }
+        }
+        'octoprint' {
+            $envLines += @("", "# OctoPrint", "OCTOPRINT_HOST=$octoprintHost")
+            if ($octoprintApiKey -ne '') { $envLines += "OCTOPRINT_API_KEY=$octoprintApiKey" }
+        }
     }
 
     $envLines -join "`n" | Set-Content -Path '.env' -Encoding UTF8
