@@ -223,8 +223,44 @@ if (-not $skipEnv) {
         $listener.Prefixes.Add("http://localhost:${CALLBACK_PORT}/")
         try { $listener.Start() } catch { Write-Fail "Could not bind port ${CALLBACK_PORT}. In use? netstat -ano | findstr :${CALLBACK_PORT}" }
         Write-Success "Listener ready"
+
+        # -- Find printers on the LAN before opening the form -------------------
+        # The printer's address is typed into the dashboard, and owners routinely
+        # do not know it. Sweep the network first and hand the results to the
+        # form on the URL so they pick from a list instead of hunting for an IP.
+        #
+        # Strictly best-effort: every failure path here falls through to the plain
+        # dashboard. Discovery is a convenience and must never block an install.
+        $dashboardUrl = $DASHBOARD_URL
+        $discoverJs   = Join-Path $AGENT_DIR 'src\discover.js'
+        if (Test-Path $discoverJs) {
+            Write-Header "Looking for printers on your network (about 30 seconds)..."
+            try {
+                # Same guard as the npm call above: a native command writing to
+                # stderr under ErrorActionPreference='Stop' aborts the install.
+                $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+                $foundParam = & $nodeExe $discoverJs found
+                $foundCode  = $LASTEXITCODE
+                $ErrorActionPreference = $prevEAP
+
+                # Exit 3 = ran fine, found nothing. Only a real payload is used.
+                if ($foundCode -eq 0 -and $foundParam) {
+                    $foundParam = ([string](@($foundParam) | Select-Object -Last 1)).Trim()
+                }
+                if ($foundCode -eq 0 -and $foundParam -match '^[A-Za-z0-9_-]+$') {
+                    $dashboardUrl = "${DASHBOARD_URL}?found=$foundParam"
+                    Write-Success "Found printers - the dashboard form will be pre-filled"
+                } else {
+                    Write-Dim "No printers auto-detected. You'll enter the address in the dashboard."
+                }
+            } catch {
+                $ErrorActionPreference = $prevEAP
+                Write-Dim "Network scan skipped. You'll enter the address in the dashboard."
+            }
+        }
+
         Write-Info "Opening NeuSlice dashboard..."
-        Start-Process $DASHBOARD_URL
+        Start-Process $dashboardUrl
         Write-Dim "Waiting for you to complete registration in your browser (Ctrl+C to cancel)..."
         # Async accept so Ctrl+C works (a blocking GetContext() ignores it), with a
         # timeout, and so a stray hit with no ?code= doesn't kill the install - we answer
