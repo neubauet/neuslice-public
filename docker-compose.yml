@@ -98,17 +98,45 @@ services:
     # Upgrade on purpose, not on a timer: bump this tag, verify a real print
     # starts, then commit. The agent talks to Bambuddy's REST API, so its
     # breaking changes are our outages.
-    image: maziggy/bambuddy:0.2.4.9
+    #
+    # 0.2.4.9 -> 1.2.5.5 (2026-09-03). The leading digit is a versioning-scheme
+    # change, not a rewrite (upstream renamed 0.2.5 to 1.2.5); schema changes are
+    # auto-migrated column additions. Verified before bumping by diffing the
+    # OpenAPI spec of both images: all eight endpoints bambu.js calls survive,
+    # no field getStatus/selectPrinter reads was removed, and the only contract
+    # change touching us is bed_levelling / flow_cali / nozzle_offset_cali going
+    # tri-state — which still accepts the booleans the agent sends. See the
+    # tri-state note in neuslice-agent/src/adapters/bambu.js before changing it.
+    image: maziggy/bambuddy:1.2.5.5
     container_name: bambuddy
     restart: unless-stopped
+    # 1.2.5 made uvicorn PID 1 so it actually receives SIGTERM. Before that every
+    # stop/restart/image-update was a SIGKILL after the grace period: no WAL
+    # checkpoint, no clean MQTT disconnect. Upstream asks for 30s to go with it —
+    # without this the teardown is still clipped at Docker's 10s default.
+    stop_grace_period: 30s
     ports:
       - "8000:8000"
     volumes:
-      - bambuddy_data:/data
+      # /app/data, NOT /data. Bambuddy's DATA_DIR is /app/data and the image
+      # declares no VOLUME, so mounting at /data left the named volume empty
+      # while bambuddy.db, archive/, .jwt_secret and .mfa_encryption_key all sat
+      # in the container's writable layer — destroyed by any recreate (an image
+      # bump, a compose edit, `down`). Verified 2026-09-04 against a real run.
+      #
+      # MIGRATING AN EXISTING NODE: this change recreates the container, so the
+      # old writable-layer data is lost unless it is copied out FIRST and seeded
+      # into the volume. Do not hand this file to a running node without that:
+      #   docker cp bambuddy:/app/data ./bambuddy-data-backup
+      #   docker run --rm -v <project>_bambuddy_data:/v -v "$PWD/bambuddy-data-backup":/src       #     alpine sh -c 'cp -a /src/. /v/'
+      - bambuddy_data:/app/data
     environment:
       TZ: ${TZ:-America/New_York}
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8000/api/v1/health"]
+      # /health, NOT /api/v1/health — the latter is a 404 on every Bambuddy build
+      # (verified on 0.2.4.9 and 1.2.5.5), so this check could only ever fail and
+      # the container sat permanently "unhealthy".
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 5

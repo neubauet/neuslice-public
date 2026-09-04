@@ -589,6 +589,91 @@ try {
     Write-Warn "Continuing with locally cached images (if any)..."
 }
 
+# ── Bambuddy data migration (one-time) ───────────────────────────────
+# Bambuddy's DATA_DIR is /app/data, but this compose used to mount the named
+# volume at /data. The volume was therefore empty and the database, archives and
+# secrets lived in the container's writable layer — which Docker discards on
+# every recreate. The compose now mounts /app/data, and applying that remount IS
+# a recreate, so anything still in the writable layer has to be copied into the
+# volume before `up -d` runs.
+#
+# Idempotent: fires only when a bambuddy container is still on the old /data
+# mount, so re-running the installer on a migrated node does nothing.
+docker inspect bambuddy 2>$null | Out-Null
+if ($LASTEXITCODE -eq 0) {
+    # The Go template deliberately carries no double quotes. PowerShell strips
+    # embedded quotes when it hands an argument to a native exe, so the obvious
+    # `{{if eq .Destination "/data"}}` form reaches docker as `eq .Destination
+    # /data` and dies with a template parsing error — leaving $bbVol empty and
+    # skipping this whole migration silently, right before `up -d` wipes the
+    # data it was meant to save. Emit destination=name pairs and filter here.
+    $bbVol = $null
+    $bbMounts = (docker inspect bambuddy --format '{{range .Mounts}}{{.Destination}}={{.Name}};{{end}}' 2>$null)
+    if ($bbMounts) {
+        foreach ($bbM in ($bbMounts -split ';')) {
+            if (-not $bbM) { continue }
+            $bbPair = $bbM -split '=', 2
+            if ($bbPair[0] -eq '/data' -and $bbPair.Count -eq 2) { $bbVol = $bbPair[1].Trim() }
+        }
+    }
+    if ($bbVol) {
+        Write-Host ""
+        Write-Header "Migrating Bambuddy data to a persistent volume..."
+        Write-Warn "Your Bambuddy data is in the container's writable layer and would be"
+        Write-Warn "lost when it restarts on the new version. Moving it first."
+
+        # Stop first — copying a live SQLite database can capture a torn write.
+        # The -wal/-shm files come too, so it recovers cleanly.
+        docker compose stop bambuddy 2>$null | Out-Null
+
+        # A host-side copy you can fall back on by hand. This is the rollback,
+        # not the migration path — see the tar stream below.
+        $bbBackup = "bambuddy-data-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+        docker cp "bambuddy:/app/data" $bbBackup
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail "Could not copy Bambuddy's data out. Nothing has been recreated yet, so your data is still intact — re-run once the error above is resolved."
+        }
+        Write-Success "Backed up to $(Join-Path (Get-Location) $bbBackup)"
+
+        # Refuse a volume that already holds something rather than merging two
+        # states together.
+        $bbExisting = (docker run --rm -v "${bbVol}:/v" alpine sh -c 'ls -A /v 2>/dev/null')
+        if ($bbExisting) {
+            Write-Fail "Volume $bbVol already contains data. Not overwriting it — see docs/upgrading-bambuddy.md."
+        }
+
+        # Seed the volume straight out of the old container as a tar stream.
+        # Piped through cmd deliberately: PowerShell's own pipeline re-encodes
+        # the bytes and docker rejects the result with "invalid tar header"
+        # AFTER writing part of it — a partial copy that looks like a success.
+        # A stopped helper container holding the volume also avoids host paths,
+        # and tar carries Bambuddy's uid/gid across unchanged.
+        docker rm -f neuslice_bb_migrate 2>$null | Out-Null
+        docker create --name neuslice_bb_migrate -v "${bbVol}:/dest" alpine true | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail "Could not create the migration helper container. Your data is safe in $bbBackup."
+        }
+        cmd /c "docker cp bambuddy:/app/data/. - | docker cp - neuslice_bb_migrate:/dest"
+        docker rm -f neuslice_bb_migrate 2>$null | Out-Null
+
+        # Verify. A partial copy looks exactly like a good one, so never report
+        # a move that did not happen — this check is the difference between an
+        # upgrade and silent data loss.
+        $bbSeeded = (docker run --rm -v "${bbVol}:/v" alpine sh -c 'ls -A /v 2>/dev/null')
+        if (-not $bbSeeded) {
+            Write-Fail "Bambuddy's data did not reach volume $bbVol. It is still in $bbBackup — see docs/upgrading-bambuddy.md before starting the stack."
+        }
+        if (Test-Path (Join-Path $bbBackup 'bambuddy.db')) {
+            docker run --rm -v "${bbVol}:/v" alpine test -f /v/bambuddy.db
+            if ($LASTEXITCODE -ne 0) {
+                Write-Fail "The Bambuddy database did not reach volume $bbVol. It is still in $bbBackup — see docs/upgrading-bambuddy.md before starting the stack."
+            }
+        }
+        Write-Success "Bambuddy data moved onto volume $bbVol"
+        Write-Warn "Keep $bbBackup until you have confirmed your printers and history are intact."
+    }
+}
+
 Write-Host ""
 Write-Header "Starting NeuSlice node..."
 docker compose up -d
