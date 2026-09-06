@@ -175,6 +175,26 @@ services:
       # so spawned containers survive docker compose down && up.
       # Replace the left side with the actual path to this directory on your host.
       - .:/neuslice-project
+    # The agent writes to the project directory: it appends a service block to
+    # docker-compose.yml when it spawns a sibling printer, writes that sibling's
+    # .env file, and rewrites the bambuddy service after a data migration. It
+    # runs as a non-root user (uid 100 in the image), while the project dir and
+    # its files belong to whoever ran the installer (typically uid/gid 1000), so
+    # every one of those writes failed with EACCES — silently, behind a caught
+    # warning, on every default install.
+    #
+    # Joining the installing user's group is the narrow fix: on a distro with
+    # user-private groups (the default on Debian/Ubuntu/Raspberry Pi OS) that
+    # group has exactly one member, so this grants the agent nothing it could
+    # not already reach through the bind mount it already has. The installer
+    # writes NEUSLICE_HOST_GID and sets group-write on the directory and the
+    # compose file; the 1000 fallback is the usual first-user id.
+    #
+    # Running the container as root would also "work" and is deliberately not
+    # done — the agent talks to Docker through the socket proxy precisely so it
+    # never needs host root.
+    group_add:
+      - "${NEUSLICE_HOST_GID:-1000}"
     extra_hosts:
       # Makes host.docker.internal resolve on EVERY platform, so BAMBUDDY_BASE_URL
       # can use one address everywhere. Docker Desktop (macOS/Windows) provides

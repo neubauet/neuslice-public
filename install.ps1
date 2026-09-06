@@ -674,6 +674,18 @@ if ($LASTEXITCODE -eq 0) {
     }
 }
 
+# NEUSLICE_HOST_GID is what compose adds to the agent container so it can write
+# docker-compose.yml and the .env files it creates when spawning a sibling
+# printer. Docker Desktop's bind mounts do not enforce POSIX ownership, so
+# Windows needs no chmod - but the variable is written anyway so a .env copied
+# to a Linux host, or a WSL2 backend with real POSIX semantics, still resolves
+# rather than silently falling back to the default.
+if (-not (Select-String -Path '.env' -Pattern '^NEUSLICE_HOST_GID=' -Quiet -ErrorAction SilentlyContinue)) {
+    Add-Content -Path '.env' -Encoding utf8 -Value ''
+    Add-Content -Path '.env' -Encoding utf8 -Value '# Group the agent joins so it can write this directory (see docker-compose.yml)'
+    Add-Content -Path '.env' -Encoding utf8 -Value 'NEUSLICE_HOST_GID=1000'
+}
+
 Write-Host ""
 Write-Header "Starting NeuSlice node..."
 docker compose up -d

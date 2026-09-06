@@ -774,6 +774,27 @@ if [ "$NEUSLICE_DRY_RUN" = "1" ]; then
     warn "DRY RUN — skipping 'docker compose pull' and 'docker compose up -d'"
     ok "Config written; stopping before Docker as requested"
 else
+    # ── Let the agent write the project directory ────────────────────────
+    # The agent runs as a non-root user inside its container and needs to write
+    # here: a service block appended to docker-compose.yml when it spawns a
+    # sibling printer, that sibling's .env file, and the bambuddy service after
+    # a data migration. The files belong to whoever ran this installer, so
+    # without this every one of those writes fails with EACCES - and each is
+    # caught and logged rather than surfaced, so it fails quietly.
+    #
+    # group-write on the directory (new .env files) and on the compose file
+    # (rewrites), plus NEUSLICE_HOST_GID so compose can add this group to the
+    # container. On a distro with user-private groups - the default on Debian,
+    # Ubuntu and Raspberry Pi OS - that group has one member, so this grants
+    # nothing beyond the bind mount the agent already has.
+    if ! grep -q '^NEUSLICE_HOST_GID=' .env 2>/dev/null; then
+        printf '
+# Group the agent joins so it can write this directory (see docker-compose.yml)
+NEUSLICE_HOST_GID=%s
+' "$(id -g)" >> .env
+    fi
+    chmod g+w . docker-compose.yml 2>/dev/null ||         warn "Could not set group-write on $(pwd) - the agent will not be able to update docker-compose.yml itself."
+
     echo ""
     header "Pulling Docker images (this may take a minute on first run)..."
     d compose pull || {
