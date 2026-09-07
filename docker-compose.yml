@@ -29,16 +29,13 @@
 #     COMPOSE_PROFILES=bambuddy docker compose up -d # + managed Bambuddy
 #
 # ── Security: Docker socket proxy ─────────────────────────────────────────
-#   The agent needs Docker API access to auto-deploy sibling containers for
-#   additional printers registered via the web UI.  Rather than mounting the
-#   raw Docker socket (which grants full host root access), we use a socket
-#   proxy that exposes ONLY the endpoints the agent actually needs:
-#     POST /containers/create   — spawn sibling agent container
-#     POST /containers/start    — start spawned container
-#     POST /images/create       — pull latest agent image before spawning
-#   All other Docker API paths are blocked (volumes, networks, exec, etc.).
-#   Watchtower still uses the raw socket because it needs to pull images and
-#   restart containers — but it is isolated to its own socket_proxy_net.
+#   The agent uses the proxy for sibling provisioning and Bambuddy migration.
+#   CONTAINERS + POST grants broad control over containers, including arbitrary
+#   bind mounts at creation. Endpoint filtering does NOT isolate the host from
+#   a compromised agent. The internal network limits who can reach the proxy;
+#   it does not constrain container-create bodies or container ownership.
+#   Watchtower separately holds the raw socket for updates.
+#   Remaining risk and replacement design: docs/security-fixes-2026-09-07.md
 ##############################################################################
 
 services:
