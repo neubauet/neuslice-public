@@ -145,7 +145,7 @@ services:
   # Rename the service and container_name if you add more printers.
   # Each agent needs its own env_file with a unique NEUSLICE_NODE_ID + token.
   neuslice-agent:
-    image: medwiz159/neuslice:latest
+    image: medwiz159/neuslice:linux-safe
     container_name: neuslice-agent
     restart: unless-stopped
     depends_on:
@@ -204,12 +204,13 @@ services:
     labels:
       # Watchtower label-scoping: only containers with this label are updated.
       # Add this label to every neuslice-agent service you define below.
-      com.centurylinklabs.watchtower.scope: neuslice
+      com.centurylinklabs.watchtower.scope: neuslice-safe
       # REQUIRED, not decorative: watchtower runs with WATCHTOWER_LABEL_ENABLE=true,
       # which makes it update ONLY containers carrying this label. Without it the
       # agent is silently excluded from auto-updates — it keeps running the image
       # it was first pulled with, forever, with no error anywhere.
       com.centurylinklabs.watchtower.enable: "true"
+      com.centurylinklabs.watchtower.lifecycle.pre-update: 'sh -c "node /app/src/watchtower_preupdate.js || exit 75"'
     networks:
       - neuslice_net
       - socket_proxy_net
@@ -228,7 +229,7 @@ services:
   #   4. Uncomment the block below and run: docker compose up -d
   #
   # neuslice-agent-klipper1:
-  #   image: medwiz159/neuslice:latest
+  #   image: medwiz159/neuslice:linux-safe
   #   container_name: neuslice-agent-klipper1
   #   restart: unless-stopped
   #   depends_on:
@@ -245,7 +246,9 @@ services:
   #     WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_HTTP_API_TOKEN:-}
   #     DOCKER_SOCKET: tcp://docker-socket-proxy:2375
   #   labels:
-  #     com.centurylinklabs.watchtower.scope: neuslice
+  #     com.centurylinklabs.watchtower.scope: neuslice-safe
+  #     com.centurylinklabs.watchtower.enable: "true"
+  #     com.centurylinklabs.watchtower.lifecycle.pre-update: 'sh -c "node /app/src/watchtower_preupdate.js || exit 75"'
   #   networks:
   #     - neuslice_net
   #     - socket_proxy_net
@@ -257,7 +260,7 @@ services:
 
   # ── NeuSlice Agent — Printer 3 (optional, uncomment to enable) ──────────
   # neuslice-agent-3:
-  #   image: medwiz159/neuslice:latest
+  #   image: medwiz159/neuslice:linux-safe
   #   container_name: neuslice-agent-3
   #   restart: unless-stopped
   #   depends_on:
@@ -274,7 +277,9 @@ services:
   #     WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_HTTP_API_TOKEN:-}
   #     DOCKER_SOCKET: tcp://docker-socket-proxy:2375
   #   labels:
-  #     com.centurylinklabs.watchtower.scope: neuslice
+  #     com.centurylinklabs.watchtower.scope: neuslice-safe
+  #     com.centurylinklabs.watchtower.enable: "true"
+  #     com.centurylinklabs.watchtower.lifecycle.pre-update: 'sh -c "node /app/src/watchtower_preupdate.js || exit 75"'
   #   networks:
   #     - neuslice_net
   #     - socket_proxy_net
@@ -318,6 +323,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       WATCHTOWER_HTTP_API_UPDATE: "true"
+      WATCHTOWER_LIFECYCLE_HOOKS: "true"
+      WATCHTOWER_INCLUDE_STOPPED: "false"
+      WATCHTOWER_REVIVE_STOPPED: "false"
       # Keep the periodic poll running alongside the HTTP API, so upstream tags
       # are still caught on the 5-min cycle even between on-demand triggers
       # (from the agent or watchtower-trigger).
@@ -326,8 +334,8 @@ services:
       # Combined with HTTP API mode so the agent can also trigger on-demand.
       WATCHTOWER_POLL_INTERVAL: "300"
       # Label-based scope: only updates containers with
-      # com.centurylinklabs.watchtower.scope=neuslice
-      WATCHTOWER_SCOPE: neuslice
+      # com.centurylinklabs.watchtower.scope=neuslice-safe
+      WATCHTOWER_SCOPE: neuslice-safe
       WATCHTOWER_LABEL_ENABLE: "true"
       WATCHTOWER_CLEANUP: "true"
       WATCHTOWER_LOG_LEVEL: info
