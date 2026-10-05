@@ -533,6 +533,9 @@ PYEOF
         # Bambuddy ships with auth disabled by default. The agent will query
         # the printers list after startup and pick the right one.
 
+        if [ "$NEUSLICE_DRY_RUN" != "1" ] && d inspect bambuddy >/dev/null 2>&1; then
+            fail "Existing Bambuddy preserved. First-install will not replace it. Use the reviewed existing-install storage migration during an approved idle window; do not delete or register another printer."
+        fi
         COMPOSE_PROFILE="bambuddy"
         BAMBUDDY_URL="http://bambuddy:${BAMBUDDY_PORT}"
         ok "Bambuddy will be installed as part of this setup (Path A — no API key required)"
@@ -794,64 +797,11 @@ NEUSLICE_HOST_GID=%s
         warn "Image pull failed — continuing with locally cached images (if any)..."
     }
 
-    # ── Bambuddy data migration (one-time) ───────────────────
-    # Bambuddy's DATA_DIR is /app/data, but this compose used to mount the
-    # named volume at /data. The volume was therefore empty and the database,
-    # archives and secrets lived in the container's writable layer — which
-    # Docker discards on every recreate. The compose now mounts /app/data, and
-    # applying that remount IS a recreate, so anything still in the writable
-    # layer has to be copied into the volume before `up -d` runs.
-    #
-    # Idempotent: fires only when a bambuddy container is still on the old
-    # /data mount, so re-running the installer on a migrated node does nothing.
-    if [ "${ADAPTER:-}" = bambu ] && d inspect bambuddy >/dev/null 2>&1; then
-        bb_vol=$(d inspect bambuddy             --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' 2>/dev/null)
-        if [ -n "$bb_vol" ]; then
-            echo ""
-            header "Migrating Bambuddy data to a persistent volume..."
-            warn "Your Bambuddy data is in the container's writable layer and would be"
-            warn "lost when it restarts on the new version. Moving it first."
-
-            # Stop first — copying a live SQLite database can capture a torn
-            # write. The -wal/-shm files come too, so it recovers cleanly.
-            d compose stop bambuddy >/dev/null 2>&1 || true
-
-            # A host-side copy you can fall back on by hand. This is the
-            # rollback, not the migration path — see the tar stream below.
-            bb_backup="bambuddy-data-backup-$(date +%Y%m%d-%H%M%S)"
-            d cp "bambuddy:/app/data" "$bb_backup"                 || fail "Could not copy Bambuddy's data out. Nothing has been recreated yet, so your data is still intact — re-run once the error above is resolved."
-            ok "Backed up to $(pwd)/$bb_backup"
-
-            # Refuse a volume that already holds something rather than merging
-            # two states together.
-            if [ -n "$(d run --rm -v "${bb_vol}:/v" alpine sh -c 'ls -A /v 2>/dev/null')" ]; then
-                fail "Volume $bb_vol already contains data. Not overwriting it — see docs/upgrading-bambuddy.md."
-            fi
-
-            # Seed the volume straight out of the old container as a tar stream.
-            # Deliberately NOT a host bind mount: the host path is a Windows path
-            # under Git Bash and a POSIX one elsewhere, and getting it wrong
-            # mounts an empty directory and copies nothing while still exiting 0.
-            # A stopped helper container holding the volume avoids host paths
-            # entirely, and tar carries Bambuddy's uid/gid across unchanged.
-            d rm -f neuslice_bb_migrate >/dev/null 2>&1 || true
-            d create --name neuslice_bb_migrate -v "${bb_vol}:/dest" alpine true >/dev/null                 || fail "Could not create the migration helper container. Your data is safe in $(pwd)/$bb_backup."
-            d cp "bambuddy:/app/data/." - | d cp - neuslice_bb_migrate:/dest
-            d rm -f neuslice_bb_migrate >/dev/null 2>&1 || true
-
-            # Verify. A broken pipe here exits 0 on some shells and a partial
-            # copy looks exactly like a good one, so never report a move that
-            # did not happen — this check is the difference between an upgrade
-            # and silent data loss.
-            if [ -z "$(d run --rm -v "${bb_vol}:/v" alpine sh -c 'ls -A /v 2>/dev/null')" ]; then
-                fail "Bambuddy's data did not reach volume $bb_vol. It is still in $(pwd)/$bb_backup — see docs/upgrading-bambuddy.md before starting the stack."
-            fi
-            if [ -f "$bb_backup/bambuddy.db" ]                && ! d run --rm -v "${bb_vol}:/v" alpine test -f /v/bambuddy.db; then
-                fail "The Bambuddy database did not reach volume $bb_vol. It is still in $(pwd)/$bb_backup — see docs/upgrading-bambuddy.md before starting the stack."
-            fi
-            ok "Bambuddy data moved onto volume $bb_vol"
-            warn "Keep $bb_backup until you have confirmed your printers and history are intact."
-        fi
+    # Existing Bambuddy data is migrated only by the reviewed combined
+    # maintenance flow. First-install must never stop/copy/recreate an
+    # unrelated existing Bambuddy container.
+    if [ "$COMPOSE_PROFILE" = "bambuddy" ] && d inspect bambuddy >/dev/null 2>&1; then
+        fail "Bambuddy appeared during setup. It has been preserved; review the existing-install migration before starting this project."
     fi
 
     echo ""

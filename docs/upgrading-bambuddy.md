@@ -17,13 +17,32 @@ The current compose file mounts `/app/data`, so data survives from here on. But
 applying that fix is itself a recreate. **Anything still in the writable layer
 has to be copied into the volume first, or it is lost.**
 
-The installer does this for you. If you re-run it, you do not need to do
-anything by hand:
+## Existing Linux hosts
+
+**Rerunning the Linux installer does not migrate an existing installation.**
+Its existing-node check returns before the historical Bambuddy copy step.
+The released agent-only migration also does not copy Bambuddy data. Do not
+recreate an affected Bambuddy container or change its mount before a verified
+backup and copy.
+
+The [combined Linux persistence migration](linux-complete-persistence.md)
+documents the combined repair and its validation. It preserves
+the installed Bambuddy version and verifies data, ownership and permissions
+before reconciling Compose with the agent fixes. It requires an owner-approved
+idle maintenance window and exact container/storage approvals. An agent update
+or website notice is not evidence that a host has completed this migration.
+
+Check both the running container's `/app/data` mount and its Compose definition;
+a correct runtime mount alone can be lost on the next recreation. Keep original
+containers, old volumes and private backups pending verified recovery. Do not
+run the historical manual copy recipe below on Linux as a combined migration.
+
+## Existing Windows installer behavior
+
+The Windows Docker installer retains its historical migration path. This Linux
+change does not modify or publish the pending Windows release:
 
 ```
-# Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/neubauet/neuslice-public/main/install.sh | bash
-
 # Windows
 irm https://raw.githubusercontent.com/neubauet/neuslice-public/main/install.ps1 | iex
 ```
@@ -33,7 +52,7 @@ timestamped `bambuddy-data-backup-*` folder next to your `docker-compose.yml`,
 seeds the volume from it, and only then starts the new version. It is safe to
 run more than once — on an already-migrated node it does nothing.
 
-## Doing it by hand
+## Historical manual recipe (not the combined Linux migration)
 
 Only needed if you manage the stack yourself. Run these from the directory
 holding your `docker-compose.yml`.
