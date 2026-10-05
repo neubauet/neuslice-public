@@ -28,6 +28,13 @@ NEUSLICE_NONINTERACTIVE="${NEUSLICE_NONINTERACTIVE:-0}"
 # Exercise the whole flow without touching Docker (CI only).
 NEUSLICE_DRY_RUN="${NEUSLICE_DRY_RUN:-0}"
 
+# A repeated dashboard command must not overwrite Compose or restart a printer.
+if [ -f "$INSTALL_DIR/.env" ] && grep -q '^NEUSLICE_TOKEN=' "$INSTALL_DIR/.env"; then
+    echo "Existing NeuSlice installation preserved at $INSTALL_DIR. No Docker or setup-code action was performed."
+    echo "Use Add Printer in the dashboard for another printer. If the first install stopped after writing .env, confirm all printers idle, then validate and start that existing Compose project; do not register again."
+    exit 0
+fi
+
 BOLD="\033[1m"; GREEN="\033[32m"; YELLOW="\033[33m"; RED="\033[31m"
 CYAN="\033[36m"; GRAY="\033[90m"; RESET="\033[0m"
 
@@ -43,6 +50,15 @@ info()   { echo -e "  ${CYAN}$*${RESET}"; }
 # terminal simply came back, with no message, no line number and no log. Six
 # separate installer bugs presented as "it connects, then drops to the terminal".
 mkdir -p "$INSTALL_DIR"
+INSTALL_LOCK="$INSTALL_DIR/.neuslice-install.lock"
+mkdir "$INSTALL_LOCK" 2>/dev/null || { echo "Another or interrupted installer owns $INSTALL_LOCK. Inspect it before retrying; nothing was overwritten." >&2; exit 1; }
+trap 'rmdir "$INSTALL_LOCK" 2>/dev/null || true' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [ -f "$INSTALL_DIR/.env" ] && grep -q '^NEUSLICE_TOKEN=' "$INSTALL_DIR/.env"; then
+    echo "Existing installation preserved; no restart or registration performed."
+    exit 0
+fi
 LOG_FILE="${NEUSLICE_LOG:-$INSTALL_DIR/install.log}"
 printf '\n=== install run %s ===\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$LOG_FILE"
 exec > >(tee -a "$LOG_FILE") 2>&1
@@ -276,10 +292,15 @@ ok "Install directory: $INSTALL_DIR"
 header "Downloading docker-compose.yml..."
 # Cache-bust http(s) only — raw.githubusercontent caches for ~5 min. A file://
 # URL (used by the CI dry-run) must not get a query string appended.
-case "$COMPOSE_URL" in
-    http*) curl -fsSL "${COMPOSE_URL}?t=$(date +%s)" -o docker-compose.yml ;;
-    *)     curl -fsSL "${COMPOSE_URL}" -o docker-compose.yml ;;
-esac
+if [ ! -f docker-compose.yml ]; then
+    COMPOSE_TEMP=$(mktemp "$INSTALL_DIR/.compose-download.XXXXXX")
+    case "$COMPOSE_URL" in
+        http*) curl -fsSL "${COMPOSE_URL}?t=$(date +%s)" -o "$COMPOSE_TEMP" ;;
+        *)     curl -fsSL "${COMPOSE_URL}" -o "$COMPOSE_TEMP" ;;
+    esac
+    chmod 644 "$COMPOSE_TEMP"
+    mv "$COMPOSE_TEMP" docker-compose.yml
+fi
 ok "docker-compose.yml downloaded"
 
 # ── 4. Configuration ──────────────────────────────────────────────────────────
@@ -289,51 +310,6 @@ echo -e "  ${GRAY}── Setup ────────────────�
 echo ""
 
 SKIP_ENV=false
-if [ -f .env ] && grep -q "^NEUSLICE_TOKEN=" .env; then
-    EXISTING_TOKEN=$(grep "^NEUSLICE_TOKEN=" .env | cut -d'=' -f2)
-    warn "Existing .env found (token: ${EXISTING_TOKEN:0:8}...)."
-
-    # Ensure WATCHTOWER_TOKEN exists even on re-runs (older installs won't have it)
-    if ! grep -q "^WATCHTOWER_HTTP_API_TOKEN=" .env; then
-        WT=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d '[:space:]')
-        printf "\nWATCHTOWER_HTTP_API_TOKEN=%s\n" "$WT" >> .env
-        ok "Added WATCHTOWER_TOKEN to existing .env"
-    fi
-
-    # Ensure NEUSLICE_API_URL exists (pre-fix installs lack it; the agent
-    # requires it explicitly and crash-loops without it).
-    if ! grep -q "^NEUSLICE_API_URL=" .env; then
-        echo "NEUSLICE_API_URL=$BACKEND_URL" >> .env
-        ok "Added NEUSLICE_API_URL to existing .env"
-    fi
-
-    # Ensure BAMBU_USERNAME/PASSWORD exist (older installs won't have them)
-    if grep -q "^BAMBU_API_KEY=" .env && ! grep -q "^BAMBU_USERNAME=" .env; then
-        echo ""
-        info "Your .env is missing Bambuddy login credentials (needed for file upload)."
-        dim  "(These are the username and password for the Bambuddy web UI.)"
-        echo ""
-        UP_USER="${BAMBU_USERNAME:-}"
-        while [ -z "$UP_USER" ]; do
-            ask UP_USER "  Bambuddy Username: "
-            [ -z "$UP_USER" ] && warn "Username cannot be empty."
-        done
-        UP_PASS="${BAMBU_PASSWORD:-}"
-        while [ -z "$UP_PASS" ]; do
-            ask_secret UP_PASS "  Bambuddy Password: "
-            [ -z "$UP_PASS" ] && warn "Password cannot be empty."
-        done
-        printf "\nBAMBU_USERNAME=%s\n" "$UP_USER" >> .env
-        printf "BAMBU_PASSWORD=%s\n" "$UP_PASS" >> .env
-        ok "Added BAMBU_USERNAME and BAMBU_PASSWORD to existing .env"
-    fi
-
-    if ask_yn "Keep existing configuration?"; then
-        ok "Keeping existing configuration"
-        SKIP_ENV=true
-    fi
-fi
-
 if [ "$SKIP_ENV" = false ]; then
 
     # ── Get NeuSlice setup code ───────────────────────────────────────────────
@@ -415,11 +391,18 @@ PYEOF
     # ── Exchange code for node config ─────────────────────────────────────────
     header "Exchanging setup code for configuration..."
 
-    EXCHANGE_RESPONSE=$(curl -fsSL -X POST \
+    RECOVERY_FILE="$INSTALL_DIR/.neuslice-setup-recovery.json"
+    if [ -f "$RECOVERY_FILE" ]; then
+        EXCHANGE_RESPONSE=$(python3 -c 'import json,sys,hashlib; d=json.load(open(sys.argv[1])); assert d["code_hash"]==hashlib.sha256(sys.argv[2].upper().encode()).hexdigest(), "A different setup attempt is pending; recover the same node first"; print(json.dumps(d["response"]))' "$RECOVERY_FILE" "$SETUP_CODE")
+        ok "Resuming the same private setup response"
+    else
+    EXCHANGE_RESPONSE=$(curl -fsS -X POST \
         -H "Content-Type: application/json" \
         -d "{\"code\":\"$(echo "$SETUP_CODE" | tr '[:lower:]' '[:upper:]')\"}" \
         "${BACKEND_URL}/api/v1/setup/exchange") \
-        || fail "Exchange request failed. Check your internet connection."
+        || fail "Exchange request failed. Retry the same code, or obtain a new setup code for the SAME existing node if it was consumed; do not register another printer."
+    printf '%s' "$EXCHANGE_RESPONSE" | python3 -c 'import sys,json,hashlib,os,tempfile; response=json.load(sys.stdin); assert response.get("agent_token") and response.get("node_id"), "Invalid setup response"; fd,p=tempfile.mkstemp(dir=os.path.dirname(sys.argv[1])); f=os.fdopen(fd,"w"); json.dump({"code_hash":hashlib.sha256(sys.argv[2].upper().encode()).hexdigest(),"response":response},f); f.flush(); os.fsync(f.fileno()); f.close(); os.replace(p,sys.argv[1])' "$RECOVERY_FILE" "$SETUP_CODE"
+    fi
 
     AGENT_TOKEN=$(json_field "$EXCHANGE_RESPONSE" "agent_token")
     NODE_ID=$(json_field "$EXCHANGE_RESPONSE" "node_id")
@@ -497,7 +480,7 @@ PYEOF
             PROBE_PATH="/api/version"
             PROBE_KEY="$OCTOPRINT_API_KEY"
         fi
-        ADAPTER_HOST="${ADAPTER_HOST%/}"          # strip trailing slash
+        ADAPTER_HOST=$(python3 -c 'import sys,urllib.parse; v=sys.argv[1].strip(); v=v if "://" in v else "http://"+v; p=urllib.parse.urlsplit(v); assert p.scheme in ("http","https") and p.hostname and not p.username and not p.password and not p.query and not p.fragment, "Invalid printer endpoint"; print(v.rstrip("/"))' "$ADAPTER_HOST")
         ok "$ADAPTER_LABEL — no Bambuddy needed for this printer"
         dim "Connecting to $ADAPTER_HOST"
 
@@ -508,19 +491,24 @@ PYEOF
         # word-splits the header into three arguments, and macOS bash 3.2 has no
         # safe empty-array expansion under `set -u`.
         probe_adapter() {
+            local body status
+            body=$(mktemp "$INSTALL_DIR/.probe.XXXXXX")
             if [ -n "$PROBE_KEY" ]; then
-                curl -fsSL --max-time 5 -H "X-Api-Key: $PROBE_KEY" "${ADAPTER_HOST}${PROBE_PATH}" >/dev/null 2>&1
+                status=$(curl -fsS --max-time 5 -H "X-Api-Key: $PROBE_KEY" -o "$body" -w '%{http_code}' "${ADAPTER_HOST}${PROBE_PATH}") || { rm -f "$body"; return 1; }
             else
-                curl -fsSL --max-time 5 "${ADAPTER_HOST}${PROBE_PATH}" >/dev/null 2>&1
+                status=$(curl -fsS --max-time 5 -o "$body" -w '%{http_code}' "${ADAPTER_HOST}${PROBE_PATH}") || { rm -f "$body"; return 1; }
             fi
+            [ "$status" = 200 ] || { rm -f "$body"; return 1; }
+            if [ "$ADAPTER" = klipper ]; then
+                python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert isinstance(d.get("result"),dict) and "klippy_state" in d["result"]' "$body" || { rm -f "$body"; return 1; }
+            fi
+            rm -f "$body"
         }
         if ! probe_adapter; then
             echo ""
             warn "Could not reach $ADAPTER_LABEL at ${ADAPTER_HOST}${PROBE_PATH}."
             dim "Common causes: the printer is powered off, the URL is wrong, or an API key is required."
-            if ! ask_yn "Continue anyway? (the agent keeps retrying once it starts)" y; then
-                fail "Stopped at your request. Fix the URL in the dashboard and register again."
-            fi
+            fail "Printer validation failed; no agent was started. The private setup response is saved. Correct the explicit endpoint override and retry this same command; HTTPS is never downgraded."
         else
             ok "$ADAPTER_LABEL reachable"
         fi
@@ -685,7 +673,8 @@ PYEOF
     # PRINTER_ADAPTER is written explicitly rather than left to the agent's
     # auto-detection, so what the owner chose in the dashboard is what runs.
     WATCHTOWER_HTTP_API_TOKEN=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d '[:space:]')
-    cat > .env << ENV
+    ENV_TEMP=$(mktemp "$INSTALL_DIR/.env-install.XXXXXX")
+    cat > "$ENV_TEMP" << ENV
 # NeuSlice Node Configuration
 # Generated by install.sh on $(date)
 
@@ -707,14 +696,14 @@ ENV
     # ── Adapter section — only one of these ever lands in a given .env ────────
     case "$ADAPTER" in
     bambu)
-        cat >> .env << ENV
+        cat >> "$ENV_TEMP" << ENV
 
 # Bambuddy connection
 BAMBUDDY_BASE_URL=${BAMBUDDY_URL}
 ENV
         # Path B extras — API key, web-UI login (needed for file upload), printer ID
         if [ -n "$BAMBU_API_KEY" ]; then
-            cat >> .env << ENV
+            cat >> "$ENV_TEMP" << ENV
 
 # Bambuddy API credentials (Path B — existing install)
 BAMBU_API_KEY=${BAMBU_API_KEY}
@@ -724,21 +713,21 @@ ENV
         fi
 
         if [ -n "$BAMBU_PRINTER_ID" ]; then
-            echo "BAMBU_PRINTER_ID=${BAMBU_PRINTER_ID}" >> .env
+            echo "BAMBU_PRINTER_ID=${BAMBU_PRINTER_ID}" >> "$ENV_TEMP"
         fi
 
         # Compose profile for fresh Bambuddy. Only set here: without it the
         # bambuddy service in docker-compose.yml never starts, which is exactly
         # what a Klipper or OctoPrint node wants.
         if [ -n "$COMPOSE_PROFILE" ]; then
-            echo "" >> .env
-            echo "# Enable Bambuddy container (managed by NeuSlice)" >> .env
-            echo "COMPOSE_PROFILES=${COMPOSE_PROFILE}" >> .env
+            echo "" >> "$ENV_TEMP"
+            echo "# Enable Bambuddy container (managed by NeuSlice)" >> "$ENV_TEMP"
+            echo "COMPOSE_PROFILES=${COMPOSE_PROFILE}" >> "$ENV_TEMP"
         fi
         ;;
 
     klipper)
-        cat >> .env << ENV
+        cat >> "$ENV_TEMP" << ENV
 
 # Klipper via Moonraker
 KLIPPER_HOST=${KLIPPER_HOST}
@@ -747,23 +736,27 @@ ENV
         # trusted_clients. An empty value would still satisfy the agent's
         # auto-detection, so omit the line entirely rather than write "".
         if [ -n "$KLIPPER_API_KEY" ]; then
-            echo "KLIPPER_API_KEY=${KLIPPER_API_KEY}" >> .env
+            echo "KLIPPER_API_KEY=${KLIPPER_API_KEY}" >> "$ENV_TEMP"
         fi
         ;;
 
     octoprint)
-        cat >> .env << ENV
+        cat >> "$ENV_TEMP" << ENV
 
 # OctoPrint
 OCTOPRINT_HOST=${OCTOPRINT_HOST}
 ENV
         if [ -n "$OCTOPRINT_API_KEY" ]; then
-            echo "OCTOPRINT_API_KEY=${OCTOPRINT_API_KEY}" >> .env
+            echo "OCTOPRINT_API_KEY=${OCTOPRINT_API_KEY}" >> "$ENV_TEMP"
         fi
         ;;
     esac
 
-    chmod 600 .env
+    chmod 600 "$ENV_TEMP"
+    printf '\nNEUSLICE_HOST_GID=%s\n' "$(id -g)" >> "$ENV_TEMP"
+    chmod g+w . docker-compose.yml || fail "Cannot prepare this new project for agent persistence; no agent was started."
+    mv "$ENV_TEMP" .env
+    rm -f "$RECOVERY_FILE"
     ok ".env written"
 fi
 
@@ -811,7 +804,7 @@ NEUSLICE_HOST_GID=%s
     #
     # Idempotent: fires only when a bambuddy container is still on the old
     # /data mount, so re-running the installer on a migrated node does nothing.
-    if d inspect bambuddy >/dev/null 2>&1; then
+    if [ "${ADAPTER:-}" = bambu ] && d inspect bambuddy >/dev/null 2>&1; then
         bb_vol=$(d inspect bambuddy             --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' 2>/dev/null)
         if [ -n "$bb_vol" ]; then
             echo ""
