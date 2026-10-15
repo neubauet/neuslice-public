@@ -6,7 +6,7 @@ Guarded updates defer while a physical printer is printing, paused, unreachable 
 
 ## Verify the release and review access
 
-The validated source is `20c2167aec754f598defb5770630eb509bfd7057`, image `medwiz159/neuslice@sha256:884c6f073b9ac283d9a29aeec4720da818aa61ff3a6df1c88344fe81606648b9`. [Candidate/security/provenance run](https://github.com/neubauet/NeuSlice/actions/runs/38641491583). [Exact-image combined acceptance](https://github.com/neubauet/NeuSlice/actions/runs/38643785283) verifies real Bambuddy data preservation, non-root agent persistence, registration identity, U1 WebSocket inventory, recreation and Docker daemon restart on a disposable AMD64 host, plus ARM64 core runtime/permission/storage/inventory tests under QEMU. Both platform source attestations are verified. A package version such as 1.0.0 does not identify the build; use the digest and OCI revision.
+The validated source is `21bca1f2055330aee9f9075511e905da0cc89d5b`, image `medwiz159/neuslice@sha256:9b4e2d2684f4ef65e7a080159e61fae0c95380505b285f30991ac766f6301075`. [Candidate/security/provenance run](https://github.com/neubauet/NeuSlice/actions/runs/38768097420). [Exact-image combined acceptance](https://github.com/neubauet/NeuSlice/actions/runs/38769916181) verifies real Bambuddy data preservation, non-root agent persistence, registration identity, U1 WebSocket inventory, recreation and Docker daemon restart on a disposable AMD64 host, plus ARM64 core runtime/permission/storage/inventory tests under QEMU. Both platform source attestations are verified. A package version such as 1.0.0 does not identify the build; use the digest and OCI revision.
 
 Use your existing installing account and Docker access. The helper needs access to the exact project and Docker daemon; a socket grants daemon control even when mounted read-only. Plan sends only read requests and runs without a network. Apply can create/start an isolated storage helper only with exact Bambuddy approval. Agents do not receive a persistent raw Docker socket.
 
@@ -14,8 +14,8 @@ Set the actual absolute project path, pull the exact image, and request a redact
 
 ```sh
 PROJECT=/absolute/path/to/.neuslice
-IMAGE=medwiz159/neuslice@sha256:884c6f073b9ac283d9a29aeec4720da818aa61ff3a6df1c88344fe81606648b9
-REVISION=20c2167aec754f598defb5770630eb509bfd7057
+IMAGE=medwiz159/neuslice@sha256:9b4e2d2684f4ef65e7a080159e61fae0c95380505b285f30991ac766f6301075
+REVISION=21bca1f2055330aee9f9075511e905da0cc89d5b
 docker pull "$IMAGE"
 
 migrate_linux() {
@@ -31,6 +31,10 @@ migrate_linux plan
 ```
 
 Review exact container/node IDs, project path, group, original Bambuddy image, actual `/app/data` mount and Compose definition. Missing group access or credentials, remote/multiple/custom Bambuddy layouts, parent mounts and unsupported archive entries stop for separate review. This helper does not broaden host modes, rotate tokens or infer that a remote service is fixed.
+
+## Cleared Bambuddy cancellation
+
+Bambuddy can retain `FAILED` after a cancelled print and a cleared plate. This release permits idle readiness only when the matching printer explicitly reports connected, plate cleared, no HMS faults, an inactive stage, zero heater targets and no AMS drying. Missing or unknown evidence still blocks the update. This readiness check does not change a job's failed or cancelled outcome.
 
 ## Existing agent journal preservation
 
