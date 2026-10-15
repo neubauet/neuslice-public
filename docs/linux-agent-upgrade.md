@@ -6,7 +6,7 @@ Guarded updates defer while a physical printer is printing, paused, unreachable 
 
 ## Verify the release and review access
 
-The validated source is `83294fd1fefd0864b5fa1fc6a13277d31f99c76c`, image `medwiz159/neuslice@sha256:fd205dd9d9dae646d038917be5d195523254835606c6ea70a203aca9bb16fd01`. [Candidate/security/provenance run](https://github.com/neubauet/NeuSlice/actions/runs/37367292055). [Exact-image combined acceptance](https://github.com/neubauet/NeuSlice/actions/runs/37369952666) verifies real Bambuddy data preservation, non-root agent persistence, registration identity, U1 WebSocket inventory, recreation and Docker daemon restart on a disposable AMD64 host, plus ARM64 core runtime/permission/storage/inventory tests under QEMU. Both platform source attestations are verified. A package version such as 1.0.0 does not identify the build; use the digest and OCI revision.
+The validated source is `20c2167aec754f598defb5770630eb509bfd7057`, image `medwiz159/neuslice@sha256:884c6f073b9ac283d9a29aeec4720da818aa61ff3a6df1c88344fe81606648b9`. [Candidate/security/provenance run](https://github.com/neubauet/NeuSlice/actions/runs/38641491583). [Exact-image combined acceptance](https://github.com/neubauet/NeuSlice/actions/runs/38643785283) verifies real Bambuddy data preservation, non-root agent persistence, registration identity, U1 WebSocket inventory, recreation and Docker daemon restart on a disposable AMD64 host, plus ARM64 core runtime/permission/storage/inventory tests under QEMU. Both platform source attestations are verified. A package version such as 1.0.0 does not identify the build; use the digest and OCI revision.
 
 Use your existing installing account and Docker access. The helper needs access to the exact project and Docker daemon; a socket grants daemon control even when mounted read-only. Plan sends only read requests and runs without a network. Apply can create/start an isolated storage helper only with exact Bambuddy approval. Agents do not receive a persistent raw Docker socket.
 
@@ -14,8 +14,8 @@ Set the actual absolute project path, pull the exact image, and request a redact
 
 ```sh
 PROJECT=/absolute/path/to/.neuslice
-IMAGE=medwiz159/neuslice@sha256:fd205dd9d9dae646d038917be5d195523254835606c6ea70a203aca9bb16fd01
-REVISION=83294fd1fefd0864b5fa1fc6a13277d31f99c76c
+IMAGE=medwiz159/neuslice@sha256:884c6f073b9ac283d9a29aeec4720da818aa61ff3a6df1c88344fe81606648b9
+REVISION=20c2167aec754f598defb5770630eb509bfd7057
 docker pull "$IMAGE"
 
 migrate_linux() {
@@ -31,6 +31,12 @@ migrate_linux plan
 ```
 
 Review exact container/node IDs, project path, group, original Bambuddy image, actual `/app/data` mount and Compose definition. Missing group access or credentials, remote/multiple/custom Bambuddy layouts, parent mounts and unsupported archive entries stop for separate review. This helper does not broaden host modes, rotate tokens or infer that a remote service is fixed.
+
+## Existing agent journal preservation
+
+This release also introduces durable regular-job recovery. Before replacing an existing agent, inventory its effective regular and production journal roots, including writable-layer production history. Preserve stopped-source bytes, per-node namespaces, claims, cancellation evidence and release tombstones in a verified persistent project bind; explicitly configure `NEUSLICE_CONFIG_DIR`. An empty cloud queue or idle heartbeat is not proof that no unresolved journal exists. Conflicting, unreadable, torn or unknown outcomes stop adoption for review. The general migration helper below is not a substitute for this per-installation preservation review and does not authorize deleting old records.
+
+The serving backend must expose the authenticated recovery-v1 contract. Keep automatic updates excluded until the installed agent has verified backend compatibility, physical identity, journal continuity and update-hook authentication. Then enroll the approved public guarded channel and verify an actual scheduled updater cycle.
 
 ## Apply during an approved idle window
 
