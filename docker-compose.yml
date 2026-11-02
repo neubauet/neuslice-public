@@ -104,7 +104,10 @@ services:
     # change touching us is bed_levelling / flow_cali / nozzle_offset_cali going
     # tri-state — which still accepts the booleans the agent sends. See the
     # tri-state note in neuslice-agent/src/adapters/bambu.js before changing it.
-    image: maziggy/bambuddy:1.2.5.5
+    # 1.2.5.7: API/schema and backup/rollback verified; ARM64 physical print
+    # completed 2026-11-02. Pin the tested multi-platform digest. Existing hosts
+    # require an idle, backed-up upgrade; see docs/upgrading-bambuddy.md.
+    image: maziggy/bambuddy:1.2.5.7@sha256:807f67511fa8c2b644b09de50a5d41794372214d00bd04fda59f576d9958d280
     container_name: bambuddy
     restart: unless-stopped
     # 1.2.5 made uvicorn PID 1 so it actually receives SIGTERM. Before that every
