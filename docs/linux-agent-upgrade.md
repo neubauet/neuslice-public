@@ -6,7 +6,7 @@ Guarded updates defer while a physical printer is printing, paused, unreachable 
 
 ## Verify the release and review access
 
-The validated source is `21bca1f2055330aee9f9075511e905da0cc89d5b`, image `medwiz159/neuslice@sha256:9b4e2d2684f4ef65e7a080159e61fae0c95380505b285f30991ac766f6301075`. [Candidate/security/provenance run](https://github.com/neubauet/NeuSlice/actions/runs/38768097420). [Exact-image combined acceptance](https://github.com/neubauet/NeuSlice/actions/runs/38769916181) verifies real Bambuddy data preservation, non-root agent persistence, registration identity, U1 WebSocket inventory, recreation and Docker daemon restart on a disposable AMD64 host, plus ARM64 core runtime/permission/storage/inventory tests under QEMU. Both platform source attestations are verified. A package version such as 1.0.0 does not identify the build; use the digest and OCI revision.
+The validated source is `655d6a0b2e9b603e35e900466f05d244bf832bab`, image `medwiz159/neuslice@sha256:d4c0e297520c775004f5c5b323977131b06748161f425e774dc860cab5d3585f`. [Candidate/security/provenance run](https://github.com/neubauet/NeuSlice/actions/runs/42521161448). [Exact-image combined acceptance](https://github.com/neubauet/NeuSlice/actions/runs/42521495632) verifies real Bambuddy data preservation, non-root agent persistence, registration identity, U1 WebSocket inventory, recreation and Docker daemon restart on a disposable AMD64 host, plus ARM64 core runtime/permission/storage/inventory tests under QEMU. Both platform source attestations are verified. A package version such as 1.0.0 does not identify the build; use the digest and OCI revision.
 
 Use your existing installing account and Docker access. The helper needs access to the exact project and Docker daemon; a socket grants daemon control even when mounted read-only. Plan sends only read requests and runs without a network. Apply can create/start an isolated storage helper only with exact Bambuddy approval. Agents do not receive a persistent raw Docker socket.
 
@@ -14,8 +14,8 @@ Set the actual absolute project path, pull the exact image, and request a redact
 
 ```sh
 PROJECT=/absolute/path/to/.neuslice
-IMAGE=medwiz159/neuslice@sha256:9b4e2d2684f4ef65e7a080159e61fae0c95380505b285f30991ac766f6301075
-REVISION=21bca1f2055330aee9f9075511e905da0cc89d5b
+IMAGE=medwiz159/neuslice@sha256:d4c0e297520c775004f5c5b323977131b06748161f425e774dc860cab5d3585f
+REVISION=655d6a0b2e9b603e35e900466f05d244bf832bab
 docker pull "$IMAGE"
 
 migrate_linux() {
